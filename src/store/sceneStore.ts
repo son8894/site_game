@@ -44,7 +44,7 @@ import type { ClonerConfig } from '@/types/scene';
 export type PendingPlacement =
   | { kind: 'shape'; shape: PrimitiveShape }
   | { kind: 'asset'; asset: AssetRefSchema }
-  | { kind: 'content'; contentType: ContentType }
+  | { kind: 'content'; contentType: ContentType; url?: string }
   | { kind: 'particle'; preset: ParticlePreset }
   | { kind: 'light'; lightType: LightType };
 type PlaceXZ = { x: number; z: number };
@@ -147,7 +147,7 @@ interface SceneActions {
   updateProfileObject: (id: string, shape: 'extrude' | 'lathe', profile: { x: number; y: number }[], extrudeDepth: number, closed: boolean, profileRaw?: { x: number; y: number }[], smooth?: boolean) => void;
   addAsset: (asset: AssetRefSchema) => void;
   addAssetObject: (asset: AssetRefSchema, placeAt?: PlaceXZ, extra?: Partial<ObjectNodeSchema>) => void;
-  addContentObject: (type: ContentType, placeAt?: PlaceXZ) => void;
+  addContentObject: (type: ContentType, placeAt?: PlaceXZ, url?: string) => void;
   addParticleObject: (preset: ParticlePreset, placeAt?: PlaceXZ) => void;
   /** 배치 모드 — 뷰포트 클릭 위치에 생성. begin=시작(고스트 따라다님), commit=클릭 위치에 생성, cancel=ESC 취소 */
   pendingPlacement: PendingPlacement | null;
@@ -219,6 +219,18 @@ interface SceneActions {
   removeMaterialAsset: (id: string) => void;                              // 참조 오브젝트는 인라인으로 detach 후 삭제
   assignMaterialAsset: (objectIds: string[], materialId: string) => void; // 오브젝트에 에셋 연결
   detachMaterial: (objectId: string) => void;                            // 연결 끊기(현재 재질을 인라인으로 복사)
+  // ── JSON 가져오기 ──
+  // 재질 JSON(들)을 공용 재질 라이브러리에 일괄 추가(1회 undo). 추가된 개수 반환.
+  importMaterialAssets: (items: { name: string; material: MaterialOverride }[]) => number;
+  // 씬 JSON(objects/assets/materialAssets)을 현재 씬에 병합. id는 전부 새로 발급해 충돌을 피하고,
+  // parentId/assetId/materialId/이벤트 value의 오브젝트 참조를 새 id로 리맵한다. 가져온 assets는
+  // external:true로 표시(스토리지 파일을 이 프로젝트로 복사하지 않고 원본 URL을 그대로 참조 — 삭제해도
+  // 원본 파일은 지우지 않음). 루트 오브젝트를 선택 상태로 남긴다.
+  importSceneJson: (data: { objects: Partial<ObjectNodeSchema>[]; assets: AssetRefSchema[]; materialAssets: MaterialAsset[] }) => {
+    objectCount: number;
+    assetCount: number;
+    materialCount: number;
+  };
   // ── 공용 색 에셋 ──
   addColorAsset: (name: string, color: string) => void;
   removeColorAsset: (id: string) => void;
@@ -860,7 +872,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set, get) => ({
     const at: PlaceXZ = { x, z };
     if (p.kind === 'shape') get().addObject(p.shape, at);
     else if (p.kind === 'asset') get().addAssetObject(p.asset, at);
-    else if (p.kind === 'content') get().addContentObject(p.contentType, at);
+    else if (p.kind === 'content') get().addContentObject(p.contentType, at, p.url);
     else if (p.kind === 'particle') get().addParticleObject(p.preset, at);
     else if (p.kind === 'light') get().addLightObject(p.lightType, at);
     set({ pendingPlacement: null });
@@ -871,7 +883,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set, get) => ({
   setCameraBookmark: (slot, position, target) =>
     set((s) => ({ cameraBookmarks: { ...s.cameraBookmarks, [slot]: { position, target } } })),
 
-  addContentObject: (type, placeAt) => {
+  addContentObject: (type, placeAt, url) => {
     objectCounter += 1;
     const defaults = {
       text: { text: '텍스트를 입력하세요', fontSize: 0.5, color: '#ffffff', depth: 0.1 },
@@ -883,7 +895,7 @@ export const useSceneStore = create<SceneState & SceneActions>((set, get) => ({
       primitiveShape: 'plane',
       position: { x: placeAt?.x ?? 0, y: 0.5, z: placeAt?.z ?? 0 },
       scale: type === 'video' ? { x: 16 / 9, y: 1, z: 1 } : { x: 2, y: 1, z: 1 },
-      content: { type, ...defaults[type] },
+      content: { type, ...defaults[type], ...(url ? { url } : {}) },
     });
     const { objects, environment, past } = get();
     set({
@@ -1686,6 +1698,96 @@ export const useSceneStore = create<SceneState & SceneActions>((set, get) => ({
       ...withHistory({ objects, environment }, past),
     });
   },
+  // ── JSON 가져오기 ──
+  importMaterialAssets: (items) => {
+    if (items.length === 0) return 0;
+    const { objects, environment, materialAssets, past } = get();
+    const additions: MaterialAsset[] = items.map((it, i) => ({
+      id: MathUtils.generateUUID(),
+      name: it.name.trim() || `가져온 재질 ${materialAssets.length + i + 1}`,
+      material: { ...it.material },
+    }));
+    set({
+      materialAssets: [...materialAssets, ...additions],
+      isModified: true,
+      ...withHistory({ objects, environment, materialAssets }, past),
+    });
+    return additions.length;
+  },
+
+  importSceneJson: (data) => {
+    const { objects, assets, environment, materialAssets, past } = get();
+
+    // 1. 새 id 발급(오브젝트/에셋/재질 전부 이 씬의 기존 항목과 충돌하지 않게)
+    const idMap = new Map<string, string>();
+    for (const raw of data.objects) {
+      if (typeof raw.id === 'string') idMap.set(raw.id, MathUtils.generateUUID());
+    }
+    const assetIdMap = new Map<string, string>();
+    for (const a of data.assets) assetIdMap.set(a.id, MathUtils.generateUUID());
+    const materialIdMap = new Map<string, string>();
+    for (const m of data.materialAssets) materialIdMap.set(m.id, MathUtils.generateUUID());
+
+    // 2. 에셋/재질 병합 — external:true = 원본 URL을 그대로 참조(스토리지 복사 없음, 삭제 시 원본 보호)
+    const newAssets: AssetRefSchema[] = data.assets.map((a) => ({ ...a, id: assetIdMap.get(a.id)!, external: true }));
+    const newMaterialAssets: MaterialAsset[] = data.materialAssets.map((m) => ({
+      id: materialIdMap.get(m.id)!,
+      name: (m.name || '가져온 재질').trim(),
+      material: { ...m.material },
+    }));
+
+    // 이벤트 value(objectId 또는 "objectId|...") 안의 오브젝트 참조를 새 id로 리맵
+    const remapEventValue = (value: string): string => {
+      const parts = value.split('|');
+      const mapped = idMap.get(parts[0]);
+      if (!mapped) return value;
+      parts[0] = mapped;
+      return parts.join('|');
+    };
+    const remapEvents = (events: unknown): EventSchema[] => {
+      if (!Array.isArray(events)) return [];
+      return (events as EventSchema[]).map((ev) => ({
+        ...ev,
+        value: typeof ev.value === 'string' ? remapEventValue(ev.value) : ev.value,
+        ...(typeof ev.elseValue === 'string' ? { elseValue: remapEventValue(ev.elseValue) } : {}),
+      }));
+    };
+
+    // 3. 오브젝트 리맵 — parentId가 가져온 집합 밖을 가리키면 루트로 승격
+    const importedRootIds: string[] = [];
+    const newObjects: ObjectNodeSchema[] = data.objects.map((raw) => {
+      const newId = idMap.get(raw.id as string)!;
+      const oldParentId = typeof raw.parentId === 'string' ? raw.parentId : null;
+      const newParentId = oldParentId && idMap.has(oldParentId) ? idMap.get(oldParentId)! : null;
+      if (!newParentId) importedRootIds.push(newId);
+      const newAssetId = typeof raw.assetId === 'string' && assetIdMap.has(raw.assetId) ? assetIdMap.get(raw.assetId)! : null;
+      const newMaterialId = typeof raw.materialId === 'string' && materialIdMap.has(raw.materialId) ? materialIdMap.get(raw.materialId) : undefined;
+      return makeBaseObject({
+        ...raw,
+        id: newId,
+        name: typeof raw.name === 'string' && raw.name.trim() ? raw.name : '가져온 오브젝트',
+        parentId: newParentId,
+        assetId: newAssetId,
+        materialId: newMaterialId,
+        physics: { ...DEFAULT_PHYSICS, ...(raw.physics as Partial<typeof DEFAULT_PHYSICS> | undefined) },
+        events: remapEvents(raw.events),
+        locked: false,
+      });
+    });
+
+    set({
+      objects: [...objects, ...newObjects],
+      assets: [...assets, ...newAssets],
+      materialAssets: [...materialAssets, ...newMaterialAssets],
+      selectedId: importedRootIds[0] ?? null,
+      selectedIds: importedRootIds,
+      isModified: true,
+      ...withHistory({ objects, environment, materialAssets }, past),
+    });
+
+    return { objectCount: newObjects.length, assetCount: newAssets.length, materialCount: newMaterialAssets.length };
+  },
+
   addColorAsset: (name, color) => {
     const { colorAssets } = get();
     set({ colorAssets: [...colorAssets, { id: MathUtils.generateUUID(), name: name.trim() || color, color }], isModified: true });

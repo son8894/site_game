@@ -4,6 +4,35 @@
 > 다른 컴퓨터/새 세션에서 작업을 이어갈 때 여기를 읽으면 현재 맥락을 파악할 수 있다.
 > **작업 중 중요한 변경/결정이 생기면 이 파일을 갱신할 것.**
 
+## 🔄 진행 중 (2026-07-16) — 🤖 Generate 탭 (AI로 오브젝트/씬/재질 생성, Claude 세션 + BYOK)
+
+> tsc 클린 + **세션 경로 헤드리스 E2E 검증 완료(오브젝트+씬 둘 다)**: `/api/generate`(구독 세션)로 ①"빨간 지붕의 작은 오두막" → 12개 프리미티브 조립(그룹 루트+몸체/frustum 지붕/문+손잡이/창문 3/굴뚝+캡/계단/덤불) ②"파스텔톤 로우폴리 마을" → **60개 오브젝트·그룹 9개**, id/부모참조/위치 전부 정상(y=scale.y/2 바닥 안착 규칙 준수, 전 항목 문자열 id = parseSceneJson 통과). **브라우저 UI 흐름(생성→미리보기→적용) 확인 대기.**
+> **버그 1건 수정**: 초기 `maxTurns:1`이 복잡한 씬(60개 규모)에서 `error_max_turns`로 실패 — 도구 없는 순수 텍스트 생성도 내부적으로 여러 턴이 필요할 수 있음. **`maxTurns:3`으로 완화**해 해결.
+
+- **공급자 3종**: ①**'session'(기본)** — 신규 `/api/generate` 라우트가 **Claude Agent SDK**(`@anthropic-ai/claude-agent-sdk` 설치됨)로 이 머신의 Claude Code 로그인(구독 플랜) 사용, `query({prompt, options:{systemPrompt, maxTurns:3, allowedTools:[]}})` 텍스트 생성. **로컬 개발 전용**(배포 서버엔 로그인 없음). ②③ Claude API/Gemini API = BYOK 브라우저 직접 호출.
+
+- **방향 전환(사용자)**: Import 탭의 단순 가져오기(모델/이미지/재질 JSON/씬 JSON)는 다른 탭에도 있어 중복 → **Import 탭 폐기, Generate 탭으로 교체**(TABS 맨 앞). 프롬프트 → AI가 **우리 씬 JSON을 직접 생성** → 기존 `importSceneJson`/`importMaterialAssets` 파이프라인으로 병합(SceneCraft/Holodeck 계열 접근 — 결과물이 전부 편집 가능한 네이티브 오브젝트라는 게 차별점). Import 기능 자체는 제거됐지만 파서(`importJson.ts`)·스토어 액션은 Generate가 재사용.
+- **LLM 연동 = BYOK(Bring Your Own Key)**: 사용자가 자기 Claude/Gemini API 키 입력 → **브라우저에서 공급자 API 직접 호출**(Anthropic은 `anthropic-dangerous-direct-browser-access` 헤더로 CORS 허용, Gemini는 기본 허용) → 우리 서버에 키 저장/경유 없음, 비용은 키 소유자 부담. **주의: Claude Pro(웹 구독)는 API에 못 씀**(구독≠API) — 구독 OAuth 연동은 provider 추상화만 해두고 추후 검토. 키는 `aiPrefsStore`(zustand persist, localStorage `park3d-ai-prefs`)에 저장.
+- **신규 파일**: `src/store/aiPrefsStore.ts`(provider claude|gemini + 키) · `src/lib/aiGenerate.ts`(callClaude=claude-opus-4-8/callGemini=gemini-2.5-flash + `extractJson` 관대 파싱[코드펜스/설명문 혼입 대응] + 시스템 프롬프트 3종: MATERIAL/SCENE/OBJECT — 스키마 문서(영어)로 ObjectNode 필드·배치 규칙[중심 원점→y=scale.y/2 바닥 안착·plane 금지=얇은 박스·40m 범위·로우폴리 플랫컬러] 명시).
+- **UI(`AssetBrowser.tsx` Generate 탭)**: AI 설정 접이식(공급자 토글+키 입력+발급 링크+"브라우저에만 저장" 안내) → 서브탭(오브젝트/씬/재질) → 프롬프트 textarea → 생성 버튼 → **결과 스테이징 카드**(재질=스와치 미리보기, 씬/오브젝트=이름 목록 — 사용자 피드백 "바로 적용하지 말고 미리보기→선택" 원칙) → [적용](import 실행)/[다시 생성]/[취소].
+- **남은 것**: ①실키 브라우저 테스트 ②씬 Export(예시 라이브러리 축적용 — few-shot이 품질 레버) ③배치 보정(바닥스냅·겹침) ④비전 피드백 루프(v2) ⑤사용자별 호출 제한/플랜 게이팅(자체 키 제공 시점에 필요). 레퍼런스 조사(Holodeck·SceneCraft·LayoutGPT·LL3M)는 이 세션 대화 참고 — 핵심 교훈: few-shot 예시 + 관계→좌표는 코드 보정 + 비전 피드백 루프가 품질 3대 레버.
+
+## ✅ 완료였다가 폐기 (2026-07-16) — AssetBrowser 통합 "Import" 탭 (모델/이미지 + 재질 JSON + 씬 JSON 가져오기)
+
+> **폐기됨**: 위 Generate 탭으로 교체(단순 import는 다른 탭과 중복이라는 사용자 판단). `importJson.ts` 파서와 스토어 액션(`importMaterialAssets`/`importSceneJson`)은 Generate 파이프라인으로 계속 사용. GLB 업로드 검증(`validateGlb.ts`)·업로드 전 스테이징 카드·AssetPreviewPopup 에러 격리(깨진 GLB로 서비스 마비 방지)는 이 과정에서 추가되어 유지됨.
+
+> tsc 클린 + **사용자 브라우저 실동작 확인 완료**: 드래그앤드롭(재질/씬 JSON 둘 다) 정상, 재질 가져오기→Materials 탭 반영→프리미티브 적용 정상, 씬 JSON 가져오기→오브젝트 병합·부모자식 관계·이벤트 objectId 리맵(클릭 시 다른 가져온 오브젝트 숨김) 전부 정상 동작.
+
+- **배경/합의**: 사용자가 "GLB/이미지를 가져오면 우리 JSON 형태로 변환→보관함→끌어다 배치"하는 구조(Spline 스타일)를 제안. 논의 끝에 (1) 이미지는 업로드 시 텍스처/오브젝트 중 **선택**(선택지 카드), (2) 배치는 기존 클릭→뷰포트클릭 배치모드 유지(진짜 드래그앤드롭은 미도입), (3) 재질 JSON + 씬 JSON 가져오기도 **같은 곳에 탭으로 통합**하기로 확정.
+- **`AssetBrowser.tsx`에 새 최상위 탭 `Import`(TABS 배열 맨 앞) 추가**, 내부에 서브탭 3종(모델/이미지 · 재질 JSON · 씬 JSON) — 공용 드롭존(드래그앤드롭 + 클릭 파일선택) 하나를 서브탭에 따라 라우팅.
+  - **모델/이미지**: `.glb`는 기존 `uploadGlb`(모델 등록) 재사용. 이미지는 업로드 전 스테이징(`pendingImportImage`) → "텍스처로 등록"(기존 `uploadImageTexture` 경로, Textures 탭) 또는 "오브젝트로 배치"(같은 업로드 후 `beginPlacement({kind:'content', contentType:'image', url})`로 뷰포트 클릭 배치) 선택 카드.
+  - **재질 JSON**: `src/lib/importJson.ts`의 `parseMaterialJson`(형태: `{name, material}` 또는 배열/`{materials:[...]}`, 필드 화이트리스트+숫자 클램프로 검증) → 신규 스토어 액션 `importMaterialAssets(items)`(1회 undo로 `materialAssets[]`에 일괄 추가) → Materials 탭 "저장된 재질(공유)"에 나타남.
+  - **씬 JSON**: `parseSceneJson`(최상위 `objects[]` 필수, `assets`/`materialAssets`는 옵셔널) → 신규 스토어 액션 `importSceneJson(data)` — 모든 id(오브젝트/에셋/재질에셋) 새로 발급해 현재 씬과 충돌 방지, `parentId`(집합 밖이면 루트로 승격)·`assetId`·`materialId`·이벤트 `value`/`elseValue`의 objectId 참조(`"id|..."` 형태)까지 리맵, `makeBaseObject`로 누락 필드 보정(특히 `physics`는 `DEFAULT_PHYSICS`와 병합해 필수 필드 누락 방지). 병합 후 가져온 루트 오브젝트들을 선택 상태로 남김.
+- **안전장치 — `AssetRefSchema.external?: boolean`(신규 필드)**: 씬 JSON으로 가져온 에셋은 **원본 스토리지 URL을 그대로 참조**(이 프로젝트로 파일 복사 안 함, 무설치·경량 유지). 문제는 Storage 삭제 RLS가 `owner = auth.uid()`라 **같은 계정의 다른 프로젝트에서 가져온 에셋을 나중에 "삭제" 버튼으로 지우면 원본 파일이 실제로 지워질 위험**이 있었음 → `external: true`로 표시하고 `AssetBrowser.deleteAsset`이 이 플래그면 `storage.remove()` 자체를 스킵하도록 방어(DB 행/로컬 참조만 정리). 다른 사용자 소유 파일은 어차피 RLS가 막아줌(그래도 자기 계정 내 사고는 막아야 해서 추가).
+- **재사용/미신설**: 별도 export 기능 없음(요청 범위가 import만) — 씬 JSON을 테스트하려면 우리 스키마(`ObjectNodeSchema[]`)에 맞는 JSON을 직접 준비해야 함. Import 탭 안내문에 재질/씬 JSON 예시 형태를 텍스트로 표기해둠.
+- **검증 상태**: `npx tsc --noEmit` 클린 + 사용자 브라우저 확인 완료(재질 JSON·씬 JSON 드래그앤드롭·가져오기·적용·이벤트 리맵). **미검증(남음)**: (1) 이미지 드래그→"텍스처로 등록"/"오브젝트로 배치" 선택 카드 경로, (2) `external` 에셋 삭제 시 실제로 스토리지 파일이 안 지워지는지(가능하면 같은 계정 다른 프로젝트 파일로 실제 테스트). 씬 JSON은 아직 **export 기능이 없어** 테스트는 수기로 준비한 JSON으로만 확인함 — 필요 시 다음 후보로 export 추가 가능.
+- 새 파일: `src/lib/importJson.ts`(parseMaterialJson/parseSceneJson). 변경 파일: `src/types/scene.ts`(`AssetRefSchema.external`), `src/store/sceneStore.ts`(`PendingPlacement.content.url`, `addContentObject`/`commitPlacement` 배선, `importMaterialAssets`/`importSceneJson` 액션), `src/app/editor/[projectId]/panels/AssetBrowser.tsx`(Import 탭 UI + `deleteAsset`의 external 가드).
+
 ## 프로젝트 한 줄 요약
 
 코드 없이 GUI 에디터로 3D 공간/웹사이트를 만들고 배포하는 노코드 SaaS 플랫폼.

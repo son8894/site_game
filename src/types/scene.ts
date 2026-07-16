@@ -420,6 +420,9 @@ export interface AssetRefSchema {
   name: string;
   type?: 'model' | 'character' | 'audio' | 'texture';
   thumbnailUrl?: string;
+  // 씬 JSON 가져오기로 등록된 에셋 — 이 프로젝트 스토리지로 복사하지 않고 원본 URL을 그대로 참조.
+  // 삭제 시 스토리지 파일은 건드리지 않음(다른 프로젝트/계정의 원본 파일을 실수로 지우는 것 방지).
+  external?: boolean;
 }
 
 export interface ProjectSceneSchema {

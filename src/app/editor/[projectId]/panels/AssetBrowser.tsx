@@ -1,28 +1,33 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useRef, useState, Suspense } from 'react';
 import { useSceneStore } from '@/store/sceneStore';
 import { useToast } from '@/hooks/useToast';
 import { createBrowserSupabase } from '@/lib/supabase';
 import { persistCurrentScene } from '@/lib/saveScene';
 import { tryEmbedTextures } from '@/lib/glbEmbed';
 import { uploadGlbBlob, uploadAudioFile, uploadImageTexture } from '@/lib/uploadAsset';
+import { validateGLB } from '@/lib/validateGlb';
 import { AssetPreviewPopup } from './AssetPreviewPopup';
 import { SelectBox } from '@/components/ui/SelectBox';
 import { RangeSlider } from '@/components/ui/RangeSlider';
 import { InlineEditName } from '@/components/ui/InlineEditName';
 import type { AssetRefSchema, ContentType, ParticlePreset, LightType, HdrPreset, MaterialOverride } from '@/types/scene';
+import { parseMaterialJson, parseSceneJson, type ParsedSceneImport } from '@/lib/importJson';
+import { callAi, extractJson, MATERIAL_SYSTEM_PROMPT, SCENE_SYSTEM_PROMPT, OBJECT_SYSTEM_PROMPT } from '@/lib/aiGenerate';
+import { useAiPrefsStore, AI_PROVIDERS } from '@/store/aiPrefsStore';
 import {
   Package, PersonStanding, Music, Play, Square, X, Check, Plus, Type, Image as ImageIcon, Video,
   Flame, Wind, Sparkles, Snowflake, Lightbulb, Flashlight, Sun,
   Ban, Sunset, Sunrise, Moon, TreePine, Trees, Building2, Factory, Sofa, Landmark,
-  SlidersHorizontal,
+  SlidersHorizontal, Upload, FileJson, Boxes,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
-type Tab = 'models' | 'character' | 'content' | 'particle' | 'lights' | 'materials' | 'textures' | 'hdr' | 'audio';
+type Tab = 'generate' | 'models' | 'character' | 'content' | 'particle' | 'lights' | 'materials' | 'textures' | 'hdr' | 'audio';
 
 const TABS: { id: Tab; label: string; wip?: boolean }[] = [
+  { id: 'generate',  label: 'Generate' },
   { id: 'models',    label: 'Models' },
   { id: 'character', label: 'Character' },
   { id: 'content',   label: 'Content' },
@@ -32,6 +37,13 @@ const TABS: { id: Tab; label: string; wip?: boolean }[] = [
   { id: 'textures',  label: 'Textures' },
   { id: 'hdr',       label: 'HDR' },
   { id: 'audio',     label: 'Audio' },
+];
+
+type GenerateSub = 'object' | 'scene' | 'material';
+const GENERATE_SUBS: { id: GenerateSub; label: string; icon: LucideIcon }[] = [
+  { id: 'object',   label: '오브젝트 생성', icon: Boxes },
+  { id: 'scene',    label: '씬 생성',      icon: Building2 },
+  { id: 'material', label: '재질 생성',    icon: SlidersHorizontal },
 ];
 
 // 재질 프리셋 — 선택한 프리미티브의 표면 질감(roughness/metalness/발광)을 한 번에 바꾼다. 색은 유지.
@@ -103,7 +115,7 @@ const LIGHT_ITEMS: { type: LightType; label: string; icon: LucideIcon }[] = [
 export function AssetBrowser() {
   const { projectId, assets, environment, addAsset, beginPlacement, removeAsset, removeObjectsByAsset, updateEnvironment, updateObject, pushHistory,
     materialAssets, assignMaterialAsset, updateMaterialAsset, renameMaterialAsset, removeMaterialAsset,
-    colorAssets, addColorAsset, removeColorAsset } = useSceneStore();
+    colorAssets, addColorAsset, removeColorAsset, importMaterialAssets, importSceneJson } = useSceneStore();
   const [expandedMat, setExpandedMat] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('models');
   const [search, setSearch] = useState('');
@@ -114,6 +126,66 @@ export function AssetBrowser() {
   const characterInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
   const textureInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Generate 탭 상태 ──
+  const [generateSub, setGenerateSub] = useState<GenerateSub>('object');
+  const [generatePrompt, setGeneratePrompt] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [showAiSettings, setShowAiSettings] = useState(false);
+  // 생성 결과 스테이징 — 바로 적용하지 않고 미리보기 카드에서 [적용]을 눌러야 씬에 반영.
+  const [pendingGenerated, setPendingGenerated] = useState<
+    | { kind: 'material'; items: { name: string; material: MaterialOverride }[] }
+    | { kind: 'scene'; data: ParsedSceneImport }
+    | null
+  >(null);
+  const aiProvider = useAiPrefsStore((s) => s.provider);
+  const aiKeys = useAiPrefsStore((s) => s.keys);
+  const setAiProvider = useAiPrefsStore((s) => s.setProvider);
+  const setAiKey = useAiPrefsStore((s) => s.setKey);
+  const aiProviderInfo = AI_PROVIDERS.find((p) => p.id === aiProvider)!;
+  const aiKey = aiProvider === 'session' ? '' : aiKeys[aiProvider];
+  const aiReady = !aiProviderInfo.needsKey || !!aiKey;
+
+  const runGenerate = async () => {
+    const prompt = generatePrompt.trim();
+    if (!prompt || isGenerating) return;
+    if (!aiReady) {
+      setShowAiSettings(true);
+      addToast('먼저 API 키를 입력해주세요.', 'error');
+      return;
+    }
+    setIsGenerating(true);
+    setPendingGenerated(null);
+    try {
+      const system = generateSub === 'material' ? MATERIAL_SYSTEM_PROMPT
+        : generateSub === 'scene' ? SCENE_SYSTEM_PROMPT : OBJECT_SYSTEM_PROMPT;
+      const text = await callAi(aiProvider, aiKey, system, prompt);
+      const raw = extractJson(text);
+      if (generateSub === 'material') {
+        const items = parseMaterialJson(raw);
+        setPendingGenerated({ kind: 'material', items });
+      } else {
+        const data = parseSceneJson(raw);
+        setPendingGenerated({ kind: 'scene', data });
+      }
+    } catch (err) {
+      addToast(err instanceof Error ? err.message : 'AI 생성에 실패했습니다.', 'error');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const applyGenerated = () => {
+    if (!pendingGenerated) return;
+    if (pendingGenerated.kind === 'material') {
+      const count = importMaterialAssets(pendingGenerated.items);
+      addToast(`재질 ${count}개 추가됨 (Materials 탭 "저장된 재질")`, 'success');
+    } else {
+      const { objectCount } = importSceneJson(pendingGenerated.data);
+      addToast(`오브젝트 ${objectCount}개를 씬에 추가했습니다 (Ctrl+Z로 취소 가능)`, 'success');
+    }
+    setPendingGenerated(null);
+  };
 
   // 라이브러리 텍스처를 현재 선택한 프리미티브 오브젝트(들)에 적용.
   const applyTextureToSelection = (url: string) => {
@@ -246,7 +318,9 @@ export function AssetBrowser() {
       // URL은 .../object/public/{bucket}/{path} (신규) 또는
       // .../object/sign/{bucket}/{path}?token=... (구 데이터) 형태 —
       // remove()에는 버킷 이후의 경로만 전달해야 한다
-      const storagePath = (() => {
+      // external(씬 JSON 가져오기로 등록된 에셋)은 원본 URL을 그대로 참조하는 것이라
+      // 스토리지 파일을 지우면 안 됨(다른 프로젝트/계정의 원본을 실수로 삭제할 수 있음).
+      const storagePath = asset.external ? null : (() => {
         const m = asset.dracoUrl.match(/\/object\/(?:public|sign)\/assets\/([^?]+)/);
         try { return m ? decodeURIComponent(m[1]) : null; } catch { return m ? m[1] : null; }
       })();
@@ -290,6 +364,8 @@ export function AssetBrowser() {
     }
     setUploading(true);
     try {
+      // GLB 파일 검증 (깨진 파일 업로드 방지)
+      await validateGLB(file);
       // glb가 텍스처를 외부 파일로 참조하고 있고, 함께 선택한 파일 중 일치하는 게 있으면
       // 완전히 임베드된 새 glb로 재포장한다. 해당 없음/실패 시 blob은 null → 원본 그대로 업로드.
       const { blob, embeddedNames, missingNames } = await tryEmbedTextures(file, textureFiles);
@@ -366,6 +442,15 @@ export function AssetBrowser() {
     }
   };
 
+  // ── Import 탭 — 모델/이미지/재질(JSON)/씬(JSON)을 한 곳에서 드롭·선택으로 가져오기 ──
+  const readFileAsText = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result ?? ''));
+      reader.onerror = () => reject(new Error('파일을 읽을 수 없습니다.'));
+      reader.readAsText(file);
+    });
+
   const modelAssets = assets.filter((a) => a.type !== 'character' && a.type !== 'audio' && a.type !== 'texture');
   const characterAssets = assets.filter((a) => a.type === 'character');
   const audioAssets = assets.filter((a) => a.type === 'audio');
@@ -390,6 +475,153 @@ export function AssetBrowser() {
 
       {/* 콘텐츠 */}
       <div className="flex-1 overflow-y-auto p-2 pt-1">
+        {tab === 'generate' && (
+          <div className="space-y-3">
+            {/* AI 공급자/키 설정 (BYOK — 키는 이 브라우저에만 저장) */}
+            <div className="rounded-xs border border-border">
+              <button
+                onClick={() => setShowAiSettings((v) => !v)}
+                className="w-full flex items-center justify-between px-2 py-1.5 text-[9px] text-muted hover:text-foreground transition-colors"
+              >
+                <span className="flex items-center gap-1">
+                  <SlidersHorizontal size={10} />
+                  AI 설정 — {aiProviderInfo.label}
+                  {aiReady ? <Check size={10} className="text-green-500" /> : <span className="text-red-400">(키 필요)</span>}
+                </span>
+                <span>{showAiSettings ? '접기' : '펼치기'}</span>
+              </button>
+              {showAiSettings && (
+                <div className="px-2 pb-2 space-y-2 border-t border-border pt-2">
+                  <div className="grid grid-cols-3 gap-1">
+                    {AI_PROVIDERS.map((p) => (
+                      <button
+                        key={p.id}
+                        onClick={() => setAiProvider(p.id)}
+                        className={`py-1.5 rounded-xs border text-[9px] transition-colors ${
+                          aiProvider === p.id ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted hover:border-border/60'
+                        }`}
+                      >
+                        {p.label}{p.needsKey && aiKeys[p.id as 'claude' | 'gemini'] ? ' ✓' : ''}
+                      </button>
+                    ))}
+                  </div>
+                  {aiProvider === 'session' ? (
+                    <p className="text-[8px] text-muted/70 leading-relaxed">
+                      이 컴퓨터에 로그인된 Claude Code 세션(구독 플랜)으로 생성합니다 — API 키 불필요.
+                      로컬 개발 환경 전용이며, 배포 서버에서는 API 키 방식을 사용하세요.
+                    </p>
+                  ) : (
+                    <>
+                      <input
+                        type="password"
+                        value={aiKey}
+                        onChange={(e) => setAiKey(aiProvider as 'claude' | 'gemini', e.target.value)}
+                        placeholder={`${aiProviderInfo.label} 키 (${aiProviderInfo.keyHint})`}
+                        className="w-full bg-surface border border-border rounded-xs px-2 py-1.5 text-[10px] text-foreground placeholder-muted focus:outline-none focus:border-primary transition-colors"
+                      />
+                      <p className="text-[8px] text-muted/70 leading-relaxed">
+                        키는 이 브라우저(localStorage)에만 저장되며 서버로 전송되지 않습니다. 생성 비용은 키 소유자의 계정으로 청구됩니다.{' '}
+                        <a href={aiProviderInfo.keyUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline">키 발급 →</a>
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 서브탭: 오브젝트 생성 · 씬 생성 · 재질 생성 */}
+            <div className="grid grid-cols-3 gap-1">
+              {GENERATE_SUBS.map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => { setGenerateSub(id); setPendingGenerated(null); }}
+                  className={`flex flex-col items-center justify-center gap-1 py-1.5 rounded-xs border text-[9px] transition-colors ${
+                    generateSub === id ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted hover:border-border/60'
+                  }`}
+                >
+                  <Icon size={14} />
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* 프롬프트 입력 */}
+            <div className="space-y-1.5">
+              <label className="text-[9px] font-medium text-foreground block">
+                {generateSub === 'object' ? '만들고 싶은 오브젝트를 설명해 주세요' : generateSub === 'scene' ? '만들고 싶은 씬/환경을 설명해 주세요' : '만들고 싶은 재질을 설명해 주세요'}
+              </label>
+              <textarea
+                value={generatePrompt}
+                onChange={(e) => setGeneratePrompt(e.target.value)}
+                placeholder={
+                  generateSub === 'object' ? '예: 빨간 지붕의 작은 오두막, 가로등, 나무 벤치' :
+                  generateSub === 'scene' ? '예: 파스텔톤 로우폴리 마을 광장, 카페 인테리어' :
+                  '예: 유리, 크롬 금속, 네온 발광 플라스틱'
+                }
+                className="w-full h-16 bg-surface border border-border rounded-xs px-2 py-1.5 text-[10px] text-foreground placeholder-muted focus:outline-none focus:border-primary transition-colors resize-none"
+              />
+            </div>
+
+            {/* 생성 버튼 */}
+            <button
+              disabled={isGenerating || !generatePrompt.trim()}
+              onClick={runGenerate}
+              className="w-full py-2 rounded-xs bg-primary text-white hover:bg-primary/90 text-[10px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {isGenerating ? '생성 중… (수십 초 걸릴 수 있어요)' : 'AI로 생성'}
+            </button>
+
+            {/* 생성 결과 미리보기 — 적용해야 씬/라이브러리에 반영 */}
+            {pendingGenerated && (
+              <div className="p-2 rounded-xs border border-primary/40 bg-primary/5 space-y-2">
+                {pendingGenerated.kind === 'material' ? (
+                  <>
+                    <p className="text-[10px] text-foreground font-medium">재질 {pendingGenerated.items.length}개 생성됨</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {pendingGenerated.items.map((it, i) => (
+                        <div key={i} className="flex items-center gap-1 px-1.5 py-1 rounded-xs bg-surface border border-border">
+                          <span className="w-3.5 h-3.5 rounded-full border border-border/60" style={{ background: materialSwatchBg(it.material) }} />
+                          <span className="text-[9px] text-foreground">{it.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[9px] text-muted">적용하면 Materials 탭 "저장된 재질(공유)"에 추가됩니다.</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[10px] text-foreground font-medium">오브젝트 {pendingGenerated.data.objects.length}개 생성됨</p>
+                    <p className="text-[9px] text-muted leading-snug truncate">
+                      {pendingGenerated.data.objects.slice(0, 8).map((o) => o.name ?? o.id).join(' · ')}
+                      {pendingGenerated.data.objects.length > 8 ? ' …' : ''}
+                    </p>
+                    <p className="text-[9px] text-muted">적용하면 현재 씬에 병합됩니다 (Ctrl+Z로 되돌리기 가능).</p>
+                  </>
+                )}
+                <div className="flex gap-1.5">
+                  <button onClick={applyGenerated}
+                    className="flex-1 py-1.5 rounded-xs bg-primary/15 text-primary hover:bg-primary/25 text-[10px] transition-colors">
+                    적용
+                  </button>
+                  <button onClick={runGenerate} disabled={isGenerating}
+                    className="flex-1 py-1.5 rounded-xs bg-surface text-muted hover:text-foreground border border-border text-[10px] transition-colors disabled:opacity-40">
+                    다시 생성
+                  </button>
+                  <button onClick={() => setPendingGenerated(null)}
+                    className="px-2 py-1.5 rounded-xs bg-surface text-muted hover:text-foreground border border-border text-[10px] transition-colors">
+                    <X size={11} />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 안내문 */}
+            <div className="text-[9px] text-muted/70 leading-relaxed space-y-1">
+              <p>자연어 설명으로 프리미티브 조립 오브젝트·씬·PBR 재질을 생성합니다. 결과물은 전부 편집 가능한 일반 오브젝트입니다.</p>
+              <p>스타일라이즈드(로우폴리) 형태에 강하고, 캐릭터 같은 유기적 곡면은 지원하지 않습니다.</p>
+            </div>
+          </div>
+        )}
+
         {tab === 'models' && (
           <>
             <input
@@ -834,7 +1066,9 @@ function AssetCard({ asset, icon: Icon, onAdd, onDelete, deleting }: {
       )}
 
       {hoverRect && isModel && !confirmDelete && (
-        <AssetPreviewPopup url={asset.dracoUrl} name={asset.name} anchorRect={hoverRect} />
+        <Suspense fallback={null}>
+          <AssetPreviewPopup url={asset.dracoUrl} name={asset.name} anchorRect={hoverRect} />
+        </Suspense>
       )}
     </div>
   );
