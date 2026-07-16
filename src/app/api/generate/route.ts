@@ -7,13 +7,13 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
-  let body: { system?: string; prompt?: string };
+  let body: { system?: string; prompt?: string; model?: string };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: '잘못된 요청 형식입니다.' }, { status: 400 });
   }
-  const { system, prompt } = body;
+  const { system, prompt, model } = body;
   if (!system || !prompt) {
     return NextResponse.json({ error: 'system/prompt가 필요합니다.' }, { status: 400 });
   }
@@ -21,12 +21,14 @@ export async function POST(req: NextRequest) {
   try {
     let text = '';
     // 도구 없이 1턴 순수 텍스트 생성 — 시스템 프롬프트(스키마 문서)에 따라 JSON만 출력.
+    // model 미지정 시 CLI의 현재 활성 모델(/model로 설정한 값)을 그대로 상속.
     for await (const msg of query({
       prompt,
       options: {
         systemPrompt: system,
         maxTurns: 3,
         allowedTools: [],
+        ...(model ? { model } : {}),
       },
     })) {
       if (msg.type === 'result') {

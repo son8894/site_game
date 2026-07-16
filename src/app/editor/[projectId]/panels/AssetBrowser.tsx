@@ -15,7 +15,7 @@ import { InlineEditName } from '@/components/ui/InlineEditName';
 import type { AssetRefSchema, ContentType, ParticlePreset, LightType, HdrPreset, MaterialOverride } from '@/types/scene';
 import { parseMaterialJson, parseSceneJson, type ParsedSceneImport } from '@/lib/importJson';
 import { callAi, extractJson, MATERIAL_SYSTEM_PROMPT, SCENE_SYSTEM_PROMPT, OBJECT_SYSTEM_PROMPT } from '@/lib/aiGenerate';
-import { useAiPrefsStore, AI_PROVIDERS } from '@/store/aiPrefsStore';
+import { useAiPrefsStore, AI_PROVIDERS, SESSION_MODELS } from '@/store/aiPrefsStore';
 import {
   Package, PersonStanding, Music, Play, Square, X, Check, Plus, Type, Image as ImageIcon, Video,
   Flame, Wind, Sparkles, Snowflake, Lightbulb, Flashlight, Sun,
@@ -142,6 +142,8 @@ export function AssetBrowser() {
   const aiKeys = useAiPrefsStore((s) => s.keys);
   const setAiProvider = useAiPrefsStore((s) => s.setProvider);
   const setAiKey = useAiPrefsStore((s) => s.setKey);
+  const sessionModel = useAiPrefsStore((s) => s.sessionModel);
+  const setSessionModel = useAiPrefsStore((s) => s.setSessionModel);
   const aiProviderInfo = AI_PROVIDERS.find((p) => p.id === aiProvider)!;
   const aiKey = aiProvider === 'session' ? '' : aiKeys[aiProvider];
   const aiReady = !aiProviderInfo.needsKey || !!aiKey;
@@ -159,7 +161,7 @@ export function AssetBrowser() {
     try {
       const system = generateSub === 'material' ? MATERIAL_SYSTEM_PROMPT
         : generateSub === 'scene' ? SCENE_SYSTEM_PROMPT : OBJECT_SYSTEM_PROMPT;
-      const text = await callAi(aiProvider, aiKey, system, prompt);
+      const text = await callAi(aiProvider, aiKey, system, prompt, sessionModel);
       const raw = extractJson(text);
       if (generateSub === 'material') {
         const items = parseMaterialJson(raw);
@@ -506,10 +508,26 @@ export function AssetBrowser() {
                     ))}
                   </div>
                   {aiProvider === 'session' ? (
-                    <p className="text-[8px] text-muted/70 leading-relaxed">
-                      이 컴퓨터에 로그인된 Claude Code 세션(구독 플랜)으로 생성합니다 — API 키 불필요.
-                      로컬 개발 환경 전용이며, 배포 서버에서는 API 키 방식을 사용하세요.
-                    </p>
+                    <>
+                      <div className="grid grid-cols-3 gap-1">
+                        {SESSION_MODELS.map((m) => (
+                          <button
+                            key={m.id}
+                            onClick={() => setSessionModel(m.id)}
+                            title={m.hint}
+                            className={`py-1.5 rounded-xs border text-[9px] transition-colors ${
+                              sessionModel === m.id ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted hover:border-border/60'
+                            }`}
+                          >
+                            {m.label}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-[8px] text-muted/70 leading-relaxed">
+                        {SESSION_MODELS.find((m) => m.id === sessionModel)?.hint} · 이 컴퓨터에 로그인된 Claude Code 세션(구독 플랜)으로 생성합니다 — API 키 불필요.
+                        로컬 개발 환경 전용이며, 배포 서버에서는 API 키 방식을 사용하세요.
+                      </p>
+                    </>
                   ) : (
                     <>
                       <input

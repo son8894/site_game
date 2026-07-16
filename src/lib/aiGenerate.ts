@@ -1,7 +1,7 @@
 // AI 생성(Generate 탭) — 프롬프트 → 우리 씬/재질 JSON.
 // BYOK: 사용자 API 키로 브라우저에서 공급자 API를 직접 호출한다(서버 경유·키 저장 없음).
 // 출력은 기존 import 파이프라인(parseMaterialJson/parseSceneJson)으로 검증 후 씬에 병합.
-import type { AiProvider } from '@/store/aiPrefsStore';
+import type { AiProvider, SessionModel } from '@/store/aiPrefsStore';
 
 const CLAUDE_MODEL = 'claude-opus-4-8';
 const GEMINI_MODEL = 'gemini-2.5-flash';
@@ -60,11 +60,12 @@ async function callGemini(apiKey: string, system: string, user: string): Promise
 }
 
 // 로컬 Claude 세션(구독) — /api/generate 라우트가 이 머신의 Claude Code 로그인으로 생성한다.
-async function callSession(system: string, user: string): Promise<string> {
+// model 미지정 시 서버가 CLI의 현재 활성 모델(/model)을 그대로 상속.
+async function callSession(system: string, user: string, model?: SessionModel): Promise<string> {
   const res = await fetch('/api/generate', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ system, prompt: user }),
+    body: JSON.stringify({ system, prompt: user, model }),
   });
   const json = await res.json().catch(() => null);
   if (!res.ok) throw new Error(json?.error ?? `세션 생성 실패 (HTTP ${res.status})`);
@@ -72,8 +73,8 @@ async function callSession(system: string, user: string): Promise<string> {
   return json.text;
 }
 
-export async function callAi(provider: AiProvider, apiKey: string, system: string, user: string): Promise<string> {
-  if (provider === 'session') return callSession(system, user);
+export async function callAi(provider: AiProvider, apiKey: string, system: string, user: string, sessionModel?: SessionModel): Promise<string> {
+  if (provider === 'session') return callSession(system, user, sessionModel);
   if (!apiKey) throw new Error('API 키를 먼저 입력해주세요.');
   return provider === 'claude' ? callClaude(apiKey, system, user) : callGemini(apiKey, system, user);
 }

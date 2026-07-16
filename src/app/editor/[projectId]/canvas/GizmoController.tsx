@@ -193,6 +193,10 @@ function SingleGizmo({ orbitRef, gizmoDraggingRef }: Props) {
   const cLocalRef = useRef(new THREE.Vector3()); // 선택 오브젝트의 로컬 형상 중심
   const floorMinYRef = useRef(0);
   const snapTargetsRef = useRef<THREE.Box3[]>([]); // 오브젝트 스냅 대상(다른 루트 오브젝트 월드 bbox, 드래그 시작 시 스냅샷)
+  // TransformControls 'change'는 드래그 중 매우 빠르게(때론 한 틱에 여러 번) 발생 →
+  // setLive를 직접 호출하면 React 동기 업데이트 한도 초과("Maximum update depth exceeded").
+  // NumInput 드래그 스크럽과 동일하게 rAF로 프레임당 1회로 스로틀.
+  const liveRafRef = useRef<number | null>(null);
 
   const isCharPreview = selectedId === CHARACTER_PREVIEW_ID;
   const selectedObject = isCharPreview ? null : objects.find((o) => o.id === selectedId);
@@ -335,19 +339,25 @@ function SingleGizmo({ orbitRef, gizmoDraggingRef }: Props) {
           if (!gizmoDraggingRef.current) return;
           applyProxyToTarget();
           // 라이브 채널에 실시간 트랜스폼 게시 → Inspector 수치가 드래그 중 즉시 갱신(캔버스 리렌더 없음).
+          // rAF로 프레임당 1회로 스로틀(과도한 동기 리렌더로 인한 "Maximum update depth exceeded" 방지).
           if (!isCharPreview && selectedId) {
-            const p = target.position, r = target.rotation, s = target.scale;
-            useLiveTransformStore.getState().setLive({
-              id: selectedId,
-              position: { x: p.x, y: p.y, z: p.z },
-              rotation: { x: r.x * RAD2DEG, y: r.y * RAD2DEG, z: r.z * RAD2DEG },
-              scale: { x: s.x, y: s.y, z: s.z },
+            if (liveRafRef.current !== null) cancelAnimationFrame(liveRafRef.current);
+            liveRafRef.current = requestAnimationFrame(() => {
+              liveRafRef.current = null;
+              const p = target.position, r = target.rotation, s = target.scale;
+              useLiveTransformStore.getState().setLive({
+                id: selectedId,
+                position: { x: p.x, y: p.y, z: p.z },
+                rotation: { x: r.x * RAD2DEG, y: r.y * RAD2DEG, z: r.z * RAD2DEG },
+                scale: { x: s.x, y: s.y, z: s.z },
+              });
             });
           }
         }}
         onMouseUp={() => {
           gizmoDraggingRef.current = false;
           if (orbitRef.current) orbitRef.current.enabled = true;
+          if (liveRafRef.current !== null) { cancelAnimationFrame(liveRafRef.current); liveRafRef.current = null; }
           useLiveTransformStore.getState().setLive(null); // 확정값은 아래 commitTransforms가 메인 스토어에 반영
           const pos = target.position, rot = target.rotation, scl = target.scale;
           if (isCharPreview) {

@@ -12,11 +12,22 @@ export const AI_PROVIDERS: { id: AiProvider; label: string; needsKey: boolean; k
   { id: 'gemini',  label: 'Gemini API', needsKey: true, keyHint: 'AIza...', keyUrl: 'https://aistudio.google.com/apikey' },
 ];
 
+// Claude 세션(구독) 경로 전용 모델 선택 — 토큰(구독 사용량) 소모를 사용자가 직접 조절.
+export type SessionModel = 'claude-haiku-4-5' | 'claude-sonnet-5' | 'claude-opus-4-8';
+
+export const SESSION_MODELS: { id: SessionModel; label: string; hint: string }[] = [
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', hint: '가장 저렴·빠름 — 재질/단순 오브젝트' },
+  { id: 'claude-sonnet-5',  label: 'Sonnet 5',  hint: '균형 (기본값)' },
+  { id: 'claude-opus-4-8',  label: 'Opus 4.8',  hint: '최고 품질 — 복잡한 씬, 토큰 많이 씀' },
+];
+
 interface AiPrefsStore {
   provider: AiProvider;
   keys: Record<'claude' | 'gemini', string>;
+  sessionModel: SessionModel;
   setProvider: (p: AiProvider) => void;
   setKey: (p: 'claude' | 'gemini', key: string) => void;
+  setSessionModel: (m: SessionModel) => void;
 }
 
 export const useAiPrefsStore = create<AiPrefsStore>()(
@@ -24,8 +35,10 @@ export const useAiPrefsStore = create<AiPrefsStore>()(
     (set) => ({
       provider: 'session',
       keys: { claude: '', gemini: '' },
+      sessionModel: 'claude-sonnet-5',
       setProvider: (p) => set({ provider: p }),
       setKey: (p, key) => set((s) => ({ keys: { ...s.keys, [p]: key.trim() } })),
+      setSessionModel: (m) => set({ sessionModel: m }),
     }),
     { name: 'park3d-ai-prefs' },
   ),
