@@ -1,5 +1,5 @@
 import { MathUtils } from 'three';
-import type { ProjectSceneSchema, ObjectNodeSchema } from '@/types/scene';
+import type { ProjectSceneSchema, ObjectNodeSchema, EventSchema } from '@/types/scene';
 import { DEFAULT_PHYSICS, DEFAULT_ENVIRONMENT } from '@/types/scene';
 
 export interface SceneTemplate {
@@ -53,6 +53,8 @@ interface MeshOpts {
   /** 충돌(기본 true). 장식용 작은 오브젝트는 false로 두면 걷기 모드가 답답하지 않다. */
   solid?: boolean;
   doubleSided?: boolean;
+  /** 불투명도 0~1(기본 1). 유리·가림막·창문처럼 반투명이 필요할 때만. */
+  opacity?: number;
 }
 function mesh(
   shape: ObjectNodeSchema['primitiveShape'],
@@ -74,6 +76,7 @@ function mesh(
       roughness: o.roughness ?? 0.6,
       metalness: o.metalness ?? 0,
       ...(o.emissive ? { emissive: o.emissive } : {}),
+      ...(o.opacity !== undefined ? { opacity: o.opacity } : {}),
     },
     render: {
       castShadow: o.cast ?? true,
@@ -488,5 +491,473 @@ export const SCENE_TEMPLATES: SceneTemplate[] = [
         spot('카운터 조명', [-3.6, 3.1, -4.6], { intensity: 16, angle: 0.6, penumbra: 0.9, distance: 8, color: '#ffe3b8' }),
       ],
     }),
+  },
+  {
+    // ── 공포 게임: 「폐병원 — 마지막 근무」 ─────────────────────────────
+    // 다른 템플릿이 '보여주는 공간'이라면 이건 **플레이 가능한 게임**이다. 새 엔진 기능 없이 기존 조합만 썼다.
+    //
+    // ── 레퍼런스 설계(Amnesia · Outlast · Resident Evil) ──
+    //   ① **페이싱(긴장↔이완)**: 계속 최대 압박이면 지치기만 한다 → 로비·보관실은 밝게, 복도·제단실은 어둡게.
+    //   ② **세이프룸(RE)**: '보관실' — 함정 없음·초록 등·보급품. 바깥이 위험할수록 안전한 곳이 위험을 실감시킨다.
+    //   ③ **자원 희소성(Amnesia의 기름 → 배터리)**: 60초마다 1칸 소모, 0이면 사망. 주워서 버틴다.
+    //   ④ **무력하되 완전히 무력하진 않게**: 싸울 수단은 없지만 함정은 **보이고**(붉은 발광) 배터리는 **모을 수 있다**.
+    //   ⑤ **탐색 강제 + 단계적 관문**: 열쇠 2개 → 지하 격벽 · 4개 → 최종 철문.
+    //
+    // ★ **레이아웃은 반드시 `levelReachability`로 검증할 것.** 눈으로 배치하면 벽 하나가 통로를 막아도 모른다 —
+    //   실제로 보관실과 제단실이 4×6m 겹치고 지하 통로가 사방이 막혀 **깰 수 없는 게임**이 나왔는데도
+    //   구조 검사 49개는 전부 통과했다. 방 사각형은 아래 주석의 좌표표를 유지하고, 바꾸면 검사를 다시 돌릴 것.
+    //
+    //   방 배치(겹침 없음):
+    //     로비      x[ -4,  4]  z[ -1,   7]   ← 스폰 (0, 5)
+    //     복도      x[ -2,  2]  z[-17,  -1]
+    //     병실A     x[-12, -2]  z[-14,  -5]   (복도 서벽 z[-10,-8] 통로)
+    //     병실B     x[  2, 12]  z[-14,  -5]   (복도 동벽 z[-10,-8] 통로)
+    //     지하통로  x[-11, -8]  z[-19, -14]   (병실A 북벽 x[-10.5,-8.5] = 격벽)
+    //     보관실    x[-17, -8]  z[-26, -19]   (통로 남단으로 연결)
+    //     영안실    x[-25,-17]  z[-26, -19]   (보관실 서벽 z[-24,-21] 통로)
+    //     제단실    x[ -7,  7]  z[-25, -17]   (복도 북단 x[-1,1] = 철문)
+    //     탈출통로  x[-1.5,1.5] z[-28.5,-25]
+    id: 'horror',
+    name: '공포 게임',
+    description: '배터리를 아끼며 열쇠 4개를 찾아 탈출하는 폐병원 — 바로 플레이 가능',
+    emoji: '🕯',
+    build: (projectId, sceneId) => {
+      const id = {
+        door: MathUtils.generateUUID(),    // 최종 철문 — keys>=4
+        gate: MathUtils.generateUUID(),    // 지하 격벽 — keys>=2
+        key1: MathUtils.generateUUID(),
+        key2: MathUtils.generateUUID(),
+        key3: MathUtils.generateUUID(),
+        key4: MathUtils.generateUUID(),
+        scare1: MathUtils.generateUUID(),
+        scare2: MathUtils.generateUUID(),
+        scare3: MathUtils.generateUUID(),
+      };
+      const bat = [0, 1, 2, 3, 4, 5].map(() => MathUtils.generateUUID());
+      const ev = (
+        trigger: EventSchema['trigger'], action: EventSchema['action'], value: string,
+        extra: Partial<EventSchema> = {},
+      ): EventSchema => ({ id: MathUtils.generateUUID(), trigger, action, value, ...extra });
+
+      const sensor = (
+        name: string, pos: [number, number, number], scale: [number, number, number],
+        color: string, emissive: string, events: EventSchema[],
+        opts: { id?: string; opacity?: number } = {},
+      ): ObjectNodeSchema => ({
+        id: opts.id ?? MathUtils.generateUUID(),
+        name,
+        assetId: null,
+        primitiveShape: 'box',
+        material: { color, emissive, roughness: 0.9, metalness: 0, ...(opts.opacity !== undefined ? { opacity: opts.opacity } : {}) },
+        render: { castShadow: false, receiveShadow: false },
+        parentId: null,
+        layer: 'default',
+        position: { x: pos[0], y: pos[1], z: pos[2] },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: scale[0], y: scale[1], z: scale[2] },
+        visible: true,
+        locked: false,
+        physics: { ...DEFAULT_PHYSICS, enabled: true, colliderType: 'box', isSensor: true },
+        events,
+      });
+
+      // ── 재질 팔레트 ── 같은 회색을 반복하면 '박스 나열'로 보인다. 표면마다 거칠기·색조를 갈랐다.
+      const WALL = '#43403b';        // 때 낀 회벽(따뜻한 회색)
+      const WALL_D = '#332f2c';      // 어두운 구역 벽
+      const FLOOR = '#2e2b27';       // 리놀륨 바닥(약간 광택 → 조명이 비침)
+      const FLOOR_TILE = '#35322d';
+      const CEIL = '#1b1a18';
+      const TRIM = '#5a544c';        // 걸레받이·문틀
+      const METAL = '#6a6b70';
+      const RUST = '#6b4a35';
+
+      /** 벽 — 그림자 생성 off(내부에서만 보임). 걸레받이를 따로 붙여 '박스' 느낌을 줄인다. */
+      const wall = (name: string, pos: [number, number, number], scale: [number, number, number], color = WALL) =>
+        mesh('box', name, pos, scale, color, { roughness: 0.95, cast: false });
+      /** 걸레받이(baseboard) — 벽과 바닥 경계에 어두운 띠. 있고 없고가 '공간처럼 보이는지'를 가른다. */
+      const base_ = (name: string, pos: [number, number, number], scale: [number, number, number]) =>
+        mesh('box', name, pos, scale, TRIM, { roughness: 0.8, cast: false, solid: false });
+      /** 문틀 — 통로 양옆 기둥. 벽 구멍이 '문'으로 읽히게 한다. */
+      const frame = (name: string, pos: [number, number, number], scale: [number, number, number]) =>
+        mesh('box', name, pos, scale, TRIM, { roughness: 0.7, cast: false });
+      const trap = (name: string, pos: [number, number, number], s: [number, number, number]) =>
+        sensor(name, pos, s, '#4a0d0d', '#7a0f0f', [
+          ev('area_enter', 'game_lose', '어둠 속에서 무언가가 당신을 붙잡았다.'),
+        ]);
+      const key = (name: string, pos: [number, number, number], oid: string) =>
+        sensor(name, pos, [0.24, 0.24, 0.24], '#f0cc72', '#a07a12', [
+          ev('area_enter', 'set_variable', 'keys|add|1'),
+          ev('area_enter', 'hide_object', oid),
+        ], { id: oid });
+      const battery = (name: string, pos: [number, number, number], oid: string) =>
+        sensor(name, pos, [0.18, 0.32, 0.18], '#2f6f4a', '#14c078', [
+          ev('area_enter', 'set_variable', 'battery|add|1'),
+          ev('area_enter', 'hide_object', oid),
+        ], { id: oid });
+
+      return {
+        ...base(),
+        projectId,
+        sceneId,
+        environment: {
+          ...DEFAULT_ENVIRONMENT,
+          sky: { type: 'gradient', value: '#04060a', value2: '#0a0e14' },
+          fog: { enabled: true, color: '#05070b', near: 1, far: 30, mode: 'exp', density: 0.105 },
+          lights: {
+            ambientIntensity: 0.11,
+            ambientColor: '#8fa3c4',   // 차가운 달빛 — 촛불·비상등(주황)과 보색 대비
+            directionalIntensity: 0,
+            directionalPosition: { x: 5, y: 10, z: 5 },
+            sunEnabled: false,
+          },
+          // ★ 이 템플릿만 후처리를 켠다 — 공포는 **비네트(가장자리 어둠)와 블룸(빛 번짐)이 룩의 절반**이라
+          //   끄면 아무리 배치해도 '밝은 회색 박스'로 보인다. 다른 템플릿은 성능 때문에 여전히 끈 상태.
+          //   (EffectComposer가 붙는 비용은 감수 — 대신 SSAO·DoF 같은 비싼 것은 안 켠다.)
+          effects: { vignette: 0.62, bloom: 0.5, contrast: 0.14, saturation: -0.12 },
+          toneMappingExposure: 1.05,
+          contactShadows: false,
+          disableWalk: false,
+          defaultMode: 'play',
+          interactRange: 2.5,
+          playerStartPosition: { x: 0, y: 1.2, z: 5 },
+          startView: { position: { x: 0, y: 1.7, z: 6.4 }, target: { x: 0, y: 1.5, z: -6 }, fov: 55 },
+          defaultPopup: { width: '520px', height: '380px', position: 'center' },
+          // 손전등 — T키 토글. 꺼짐(기본 시작 상태)=짙은 안개로 눈앞(~3.5m)만, 켜짐=옅은 안개로 멀리(~22m)까지.
+          //   battery는 **켜져 있는 동안에만** 12초당 1씩 소모(꺼두면 안 준다 — "존재 비용"이 아니라 "사용 비용").
+          //   배터리 10개(시작 4 + 획득 6) × 12초 = 총 120초(2분)의 사용 가능 시간. 안 켜면 무제한으로 버틸 수 있지만
+          //   그 상태론 몇 미터 앞도 안 보여 사실상 탐색이 불가능 — "켜야만 진행할 수 있게" 강제하는 쪽으로 설계했다.
+          flashlight: {
+            enabled: true,
+            color: '#fff4e0',
+            intensity: 24,
+            angle: 0.48,
+            distance: 15,
+            offFogDensity: 0.28,
+            onFogDensity: 0.045,
+            batteryVariable: 'battery',
+            drainPerSec: 1 / 12,
+          },
+        },
+        variables: [
+          { id: MathUtils.generateUUID(), name: 'keys', type: 'number', initial: 0 },
+          { id: MathUtils.generateUUID(), name: 'battery', type: 'number', initial: 4 },
+          { id: MathUtils.generateUUID(), name: 'scared', type: 'boolean', initial: false },
+          { id: MathUtils.generateUUID(), name: 'scared2', type: 'boolean', initial: false },
+          { id: MathUtils.generateUUID(), name: 'scared3', type: 'boolean', initial: false },
+        ],
+        hudElements: [
+          { id: MathUtils.generateUUID(), variable: 'keys', kind: 'text', label: '열쇠', position: 'top-left', color: '#f0cc72' },
+          { id: MathUtils.generateUUID(), variable: 'battery', kind: 'bar', label: '손전등', position: 'top-left', color: '#14c078', max: 10 },
+        ],
+        sceneEvents: [
+          ev('scene_start', 'show_popup',
+            '<div style="font:15px/1.75 sans-serif;color:#d8d5d0;background:#0b0b0e;padding:26px;height:100%">'
+            + '<div style="font-size:19px;color:#c9a227;margin-bottom:14px">폐병원 — 마지막 근무</div>'
+            + '전기가 끊긴 병동에 혼자 남았다.<br>철문 너머로 나가려면 <b style="color:#f0cc72">열쇠 4개</b>가 필요하다.<br><br>'
+            + '<b style="color:#14c078">T키로 손전등을 켠다.</b> 켜져 있는 동안만 배터리가 줄어드니 아껴 써라.<br>'
+            + '배터리가 다 떨어지면 살아남지 못한다 — 방마다 <b style="color:#14c078">배터리</b>를 찾아라.<br><br>'
+            + '<span style="color:#8a8780">WASD 이동 · 마우스 시점 · T 손전등 · 붉게 빛나는 바닥은 밟지 말 것</span></div>',
+            { popup: { mode: 'html', bg: '#0b0b0e', title: '', width: '520px', height: '380px' } }),
+
+          ev('variable_changed', 'show_popup', '배터리가 얼마 남지 않았다.', {
+            conditions: [{ variable: 'battery', op: '<=', value: 1 }],
+          }),
+          ev('variable_changed', 'game_lose', '손전등이 꺼졌다. 어둠이 당신을 삼켰다.', {
+            conditions: [{ variable: 'battery', op: '<=', value: 0 }],
+          }),
+
+          ev('variable_changed', 'set_actuator', id.gate + '|open', {
+            conditions: [{ variable: 'keys', op: '>=', value: 2 }],
+          }),
+          ev('variable_changed', 'show_popup', '병실 안쪽에서 격벽이 열리는 소리가 들렸다.', {
+            conditions: [{ variable: 'keys', op: '>=', value: 2 }],
+          }),
+          ev('variable_changed', 'set_actuator', id.door + '|open', {
+            conditions: [{ variable: 'keys', op: '>=', value: 4 }],
+          }),
+          ev('variable_changed', 'show_popup', '복도 끝 철문이 열리는 소리가 들렸다.', {
+            conditions: [{ variable: 'keys', op: '>=', value: 4 }],
+          }),
+        ],
+        objects: [
+          // ══════════ 로비 x[-4,4] z[-1,7] — 밝고 안전(이완) ══════════
+          mesh('plane', '로비 바닥', [0, 0, 3], [8, 1, 8], FLOOR, { roughness: 0.55, metalness: 0.04, cast: false }),
+          mesh('box', '로비 천장', [0, 4.2, 3], [8.4, 0.3, 8.4], CEIL, { roughness: 1, cast: false }),
+          wall('로비 남벽', [0, 2.1, 7.15], [8.4, 4.2, 0.3]),
+          wall('로비 서벽', [-4.15, 2.1, 3], [0.3, 4.2, 8.4]),
+          wall('로비 동벽', [4.15, 2.1, 3], [0.3, 4.2, 8.4]),
+          wall('로비 북벽 L', [-2.5, 2.1, -1.15], [3, 4.2, 0.3]),
+          wall('로비 북벽 R', [2.5, 2.1, -1.15], [3, 4.2, 0.3]),
+          base_('로비 걸레받이 S', [0, 0.09, 6.95], [8, 0.18, 0.08]),
+          base_('로비 걸레받이 W', [-3.95, 0.09, 3], [0.08, 0.18, 8]),
+          base_('로비 걸레받이 E', [3.95, 0.09, 3], [0.08, 0.18, 8]),
+          frame('로비 문틀 L', [-1.1, 1.4, -1.15], [0.2, 2.8, 0.36]),
+          frame('로비 문틀 R', [1.1, 1.4, -1.15], [0.2, 2.8, 0.36]),
+          mesh('box', '접수 카운터', [-2.5, 0.52, 3.4], [3, 1.04, 0.8], '#4a3a2c', { roughness: 0.8, geom: { cornerRadius: 0.05 } }),
+          mesh('box', '카운터 상판', [-2.5, 1.07, 3.4], [3.2, 0.08, 0.94], '#6b5a44', { roughness: 0.5, geom: { cornerRadius: 0.2 } }),
+          mesh('box', '서류 더미', [-2.4, 1.16, 3.2], [0.44, 0.1, 0.32], '#c9c4b6', { roughness: 1, solid: false }),
+          mesh('box', '서류 더미 2', [-1.6, 1.14, 3.6], [0.38, 0.06, 0.28], '#b8b3a4', { roughness: 1, rot: [0, 22, 0], solid: false }),
+          mesh('box', '뒤집힌 의자', [2.3, 0.26, 2.4], [0.5, 0.52, 0.5], '#3a352f', { roughness: 0.9, rot: [0, 24, 74] }),
+          mesh('box', '대기 벤치', [2.6, 0.24, 5.2], [2.4, 0.48, 0.7], '#4a4038', { roughness: 0.85, geom: { cornerRadius: 0.08 } }),
+          mesh('box', '안내판', [0, 2.2, 6.95], [1.8, 0.6, 0.06], '#1f3a2c', { emissive: '#1f6b3c', roughness: 1, cast: false, solid: false }),
+          mesh('cylinder', '천장 배관', [0, 3.95, 1.4], [0.16, 8, 0.16], RUST, { roughness: 0.85, rot: [90, 0, 0], cast: false, solid: false }),
+
+          // ══════════ 복도 x[-2,2] z[-17,-1] ══════════
+          mesh('plane', '복도 바닥', [0, 0, -9], [4, 1, 16], FLOOR_TILE, { roughness: 0.6, metalness: 0.04, cast: false }),
+          mesh('box', '복도 천장', [0, 4.2, -9], [4.4, 0.3, 16], CEIL, { roughness: 1, cast: false }),
+          wall('복도 서벽 A', [-2.15, 2.1, -13.5], [0.3, 4.2, 7]),
+          wall('복도 서벽 B', [-2.15, 2.1, -4.5], [0.3, 4.2, 7]),
+          wall('복도 동벽 A', [2.15, 2.1, -13.5], [0.3, 4.2, 7]),
+          wall('복도 동벽 B', [2.15, 2.1, -4.5], [0.3, 4.2, 7]),
+          base_('복도 걸레받이 W', [-1.95, 0.09, -9], [0.08, 0.18, 16]),
+          base_('복도 걸레받이 E', [1.95, 0.09, -9], [0.08, 0.18, 16]),
+          frame('병실A 문틀 N', [-2.15, 1.4, -10.2], [0.36, 2.8, 0.24]),
+          frame('병실A 문틀 S', [-2.15, 1.4, -7.8], [0.36, 2.8, 0.24]),
+          frame('병실B 문틀 N', [2.15, 1.4, -10.2], [0.36, 2.8, 0.24]),
+          frame('병실B 문틀 S', [2.15, 1.4, -7.8], [0.36, 2.8, 0.24]),
+          // 철문 벽(문 폭 2)
+          wall('철문 벽 L', [-1.5, 2.1, -17.15], [1, 4.2, 0.3]),
+          wall('철문 벽 R', [1.5, 2.1, -17.15], [1, 4.2, 0.3]),
+          wall('철문 상인방', [0, 3.45, -17.15], [2, 1.5, 0.3]),
+          mesh('box', '복도 들것', [1.3, 0.36, -3.2], [0.7, 0.7, 1.9], METAL, { roughness: 0.6, metalness: 0.35, rot: [0, 8, 0] }),
+          mesh('box', '넘어진 링거대', [-1.4, 0.1, -12], [1.6, 0.12, 0.12], '#8a8d92', { roughness: 0.4, metalness: 0.6, rot: [0, 28, 0], solid: false }),
+          mesh('cylinder', '복도 배관 L', [-1.85, 3.95, -9], [0.13, 15, 0.13], RUST, { roughness: 0.85, rot: [90, 0, 0], cast: false, solid: false }),
+          mesh('cylinder', '복도 배관 R', [1.85, 3.95, -9], [0.1, 15, 0.1], '#4a4d52', { roughness: 0.7, rot: [90, 0, 0], cast: false, solid: false }),
+          mesh('box', '벽 얼룩 1', [-1.98, 1.5, -6.4], [0.03, 1.6, 1.1], '#241d1b', { roughness: 1, cast: false, solid: false }),
+          mesh('box', '벽 얼룩 2', [1.98, 1.2, -12.4], [0.03, 1.2, 0.9], '#241d1b', { roughness: 1, cast: false, solid: false }),
+
+          // ══════════ 병실A x[-12,-2] z[-14,-5] ══════════
+          mesh('plane', '병실A 바닥', [-7, 0, -9.5], [10, 1, 9], FLOOR, { roughness: 0.6, metalness: 0.03, cast: false }),
+          mesh('box', '병실A 천장', [-7, 4.2, -9.5], [10.4, 0.3, 9.4], CEIL, { roughness: 1, cast: false }),
+          wall('병실A 서벽', [-12.15, 2.1, -9.5], [0.3, 4.2, 9.4]),
+          wall('병실A 남벽', [-7, 2.1, -5.15], [10.4, 4.2, 0.3]),
+          // 북벽 — 격벽 통로 x[-10.5,-8.5]
+          wall('병실A 북벽 L', [-11.25, 2.1, -14.15], [1.5, 4.2, 0.3]),
+          wall('병실A 북벽 R', [-5.25, 2.1, -14.15], [6.5, 4.2, 0.3]),
+          base_('병실A 걸레받이 W', [-11.95, 0.09, -9.5], [0.08, 0.18, 9]),
+          base_('병실A 걸레받이 S', [-7, 0.09, -5.3], [10, 0.18, 0.08]),
+          frame('격벽 문틀 L', [-10.62, 1.4, -14.15], [0.24, 2.8, 0.4]),
+          frame('격벽 문틀 R', [-8.38, 1.4, -14.15], [0.24, 2.8, 0.4]),
+          mesh('box', '침대 프레임', [-10, 0.32, -11.6], [1.1, 0.64, 2.2], '#5a5751', { roughness: 0.65, metalness: 0.3 }),
+          mesh('box', '매트리스', [-10, 0.72, -11.6], [1.02, 0.2, 2.06], '#b8b2a4', { roughness: 1 }),
+          mesh('box', '베개', [-10, 0.87, -12.4], [0.7, 0.14, 0.44], '#d2ccbe', { roughness: 1, solid: false }),
+          mesh('box', '침대 프레임 2', [-10, 0.32, -7.8], [1.1, 0.64, 2.2], '#5a5751', { roughness: 0.65, metalness: 0.3 }),
+          mesh('box', '매트리스 2', [-10, 0.72, -7.8], [1.02, 0.2, 2.06], '#a8a294', { roughness: 1, rot: [0, 5, 0] }),
+          mesh('box', '가림막 레일', [-8.2, 2.9, -9.7], [0.06, 0.06, 4.4], METAL, { roughness: 0.5, metalness: 0.6, cast: false, solid: false }),
+          mesh('box', '가림막', [-8.2, 1.75, -10.6], [0.06, 2.2, 2.2], '#7a8a86', { roughness: 1, opacity: 0.85 }),
+          mesh('box', '수납장', [-3.4, 0.62, -13.2], [1.6, 1.24, 0.6], '#4a453e', { roughness: 0.88 }),
+          mesh('box', '휠체어 좌판', [-4.6, 0.5, -6.6], [0.6, 0.1, 0.6], '#2f3238', { roughness: 0.7, metalness: 0.2, rot: [0, 30, 0] }),
+          mesh('cylinder', '휠체어 바퀴', [-4.3, 0.32, -6.6], [0.62, 0.06, 0.62], '#22252a', { roughness: 0.8, rot: [0, 0, 90], solid: false }),
+          mesh('cylinder', '수액 걸이', [-8.9, 0.9, -10.4], [0.05, 1.8, 0.05], '#8a8d92', { roughness: 0.4, metalness: 0.6, solid: false }),
+          mesh('box', '깨진 창', [-12, 1.8, -8], [0.06, 1.2, 1.6], '#1a2430', { emissive: '#16324a', roughness: 0.3, cast: false, solid: false }),
+
+          // ══════════ 병실B x[2,12] z[-14,-5] — 차가운 색(수술실) ══════════
+          mesh('plane', '병실B 바닥', [7, 0, -9.5], [10, 1, 9], FLOOR_TILE, { roughness: 0.45, metalness: 0.06, cast: false }),
+          mesh('box', '병실B 천장', [7, 4.2, -9.5], [10.4, 0.3, 9.4], CEIL, { roughness: 1, cast: false }),
+          wall('병실B 동벽', [12.15, 2.1, -9.5], [0.3, 4.2, 9.4], '#474540'),
+          wall('병실B 북벽', [7, 2.1, -14.15], [10.4, 4.2, 0.3]),
+          wall('병실B 남벽', [7, 2.1, -5.15], [10.4, 4.2, 0.3]),
+          base_('병실B 걸레받이 E', [11.95, 0.09, -9.5], [0.08, 0.18, 9]),
+          base_('병실B 걸레받이 N', [7, 0.09, -13.95], [10, 0.18, 0.08]),
+          mesh('box', '수술대 다리', [7.4, 0.4, -9.8], [0.5, 0.8, 0.5], METAL, { roughness: 0.5, metalness: 0.5 }),
+          mesh('box', '수술대', [7.4, 0.88, -9.8], [1.3, 0.16, 2.4], '#8d939a', { roughness: 0.35, metalness: 0.45, geom: { cornerRadius: 0.1 } }),
+          mesh('box', '기구 트레이', [9.6, 0.52, -7.4], [1, 1.04, 0.7], '#5a5b60', { roughness: 0.55, metalness: 0.35 }),
+          mesh('box', '수술 도구', [9.6, 1.09, -7.4], [0.5, 0.06, 0.3], '#b8bec6', { roughness: 0.2, metalness: 0.9, solid: false }),
+          mesh('box', '캐비닛', [3.6, 0.92, -13.2], [1.4, 1.84, 0.5], '#454039', { roughness: 0.88 }),
+          mesh('box', '무너진 선반', [11, 0.72, -12], [1.2, 1.44, 0.5], '#454039', { roughness: 0.9, rot: [0, 0, 13] }),
+          mesh('box', '무영등 암', [7.4, 3.235, -9.8], [0.1, 1.93, 0.1], METAL, { roughness: 0.4, metalness: 0.6, cast: false, solid: false }),
+          mesh('cylinder', '무영등', [7.4, 2.24, -9.8], [1.1, 0.16, 1.1], '#c8ced6', { emissive: '#4a6a86', roughness: 0.3, metalness: 0.4, solid: false }),
+          mesh('sphere', '깨진 전구', [4.6, 2.9, -9.5], [0.2, 0.2, 0.2], '#20201e', { roughness: 0.4, solid: false }),
+          mesh('box', '타일 균열', [9, 0.02, -11.4], [2.2, 0.03, 1.6], '#232019', { roughness: 1, cast: false, solid: false }),
+
+          // ══════════ 지하 통로 x[-11,-8] z[-19,-14] ══════════
+          mesh('plane', '지하 통로 바닥', [-9.5, 0, -16.5], [3, 1, 5], '#292623', { roughness: 0.8, cast: false }),
+          mesh('box', '통로 천장', [-9.5, 4.2, -16.5], [3.4, 0.3, 5], CEIL, { roughness: 1, cast: false }),
+          wall('통로 서벽', [-11.15, 2.1, -16.5], [0.3, 4.2, 5], WALL_D),
+          wall('통로 동벽', [-7.85, 2.1, -16.5], [0.3, 4.2, 5], WALL_D),
+          mesh('cylinder', '통로 배관', [-8.2, 3.5, -16.5], [0.18, 4.8, 0.18], RUST, { roughness: 0.9, rot: [90, 0, 0], cast: false, solid: false }),
+          mesh('box', '계단 턱', [-9.5, 0.12, -14.6], [3, 0.24, 0.5], '#3a352f', { roughness: 0.9 }),
+
+          // ══════════ 보관실(세이프룸) x[-17,-8] z[-26,-19] ══════════
+          mesh('plane', '보관실 바닥', [-12.5, 0, -22.5], [9, 1, 7], '#332f2a', { roughness: 0.75, cast: false }),
+          mesh('box', '보관실 천장', [-12.5, 4.2, -22.5], [9.4, 0.3, 7.4], CEIL, { roughness: 1, cast: false }),
+          wall('보관실 서벽 A', [-17.15, 2.1, -25.25], [0.3, 4.2, 1.5]),
+          wall('보관실 서벽 B', [-17.15, 2.1, -20.05], [0.3, 4.2, 2.1]),
+          wall('보관실 남벽', [-12.5, 2.1, -26.15], [9.4, 4.2, 0.3]),
+          wall('보관실 동벽', [-7.85, 2.1, -22.5], [0.3, 4.2, 7.4]),
+          wall('보관실 북벽', [-14, 2.1, -19.15], [6.4, 4.2, 0.3]),
+          base_('보관실 걸레받이 S', [-12.5, 0.09, -25.95], [9, 0.18, 0.08]),
+          mesh('box', '선반 A', [-16.4, 0.95, -24], [1.1, 1.9, 0.5], '#4a453e', { roughness: 0.88, rot: [0, 90, 0] }),
+          mesh('box', '선반 B', [-16.4, 0.95, -21], [1.1, 1.9, 0.5], '#4a453e', { roughness: 0.88, rot: [0, 90, 0] }),
+          mesh('box', '작업대', [-11.5, 0.46, -25.2], [2.6, 0.92, 1], '#4a3a2c', { roughness: 0.82 }),
+          mesh('box', '작업대 상판', [-11.5, 0.95, -25.2], [2.76, 0.08, 1.1], '#6b5a44', { roughness: 0.5 }),
+          mesh('box', '공구 상자', [-12.4, 1.11, -25.2], [0.7, 0.24, 0.4], '#7a4a20', { roughness: 0.6, metalness: 0.2, solid: false }),
+          mesh('box', '보급 상자 1', [-9.4, 0.3, -24.4], [0.9, 0.6, 0.9], '#5a4a30', { roughness: 0.9 }),
+          mesh('box', '보급 상자 2', [-9.4, 0.85, -24.4], [0.7, 0.5, 0.7], '#4a3d28', { roughness: 0.9, rot: [0, 18, 0] }),
+          mesh('box', '안전 표식', [-12.5, 2.4, -25.95], [1.8, 0.5, 0.06], '#0f3a1e', { emissive: '#26b45c', roughness: 1, cast: false, solid: false }),
+          mesh('box', '비상 등갓', [-12.5, 3.85, -22.5], [1.2, 0.14, 0.5], '#1f4a30', { emissive: '#2fd47a', roughness: 1, cast: false, solid: false }),
+
+          // ══════════ 영안실 x[-25,-17] z[-26,-19] — 가장 깊은 곳 ══════════
+          mesh('plane', '영안실 바닥', [-21, 0, -22.5], [8, 1, 7], '#26241f', { roughness: 0.8, cast: false }),
+          mesh('box', '영안실 천장', [-21, 4.2, -22.5], [8.4, 0.3, 7.4], CEIL, { roughness: 1, cast: false }),
+          wall('영안실 서벽', [-25.15, 2.1, -22.5], [0.3, 4.2, 7.4], WALL_D),
+          wall('영안실 남벽', [-21, 2.1, -26.15], [8.4, 4.2, 0.3], WALL_D),
+          wall('영안실 북벽', [-21, 2.1, -19.15], [8.4, 4.2, 0.3], WALL_D),
+          frame('영안실 문틀 N', [-17.15, 1.4, -20.9], [0.4, 2.8, 0.24]),
+          frame('영안실 문틀 S', [-17.15, 1.4, -24.1], [0.4, 2.8, 0.24]),
+          // 시신 보관함 — 벽면 격자(이 방의 정체성)
+          mesh('box', '보관함 벽', [-21, 1.2, -25.6], [7.6, 2.4, 0.8], '#7a8086', { roughness: 0.35, metalness: 0.45 }),
+          mesh('box', '보관함 문 1', [-23.4, 1.7, -25.16], [1.1, 0.8, 0.06], '#9aa2a8', { roughness: 0.25, metalness: 0.6 }),
+          mesh('box', '보관함 문 2', [-22.1, 1.7, -25.16], [1.1, 0.8, 0.06], '#9aa2a8', { roughness: 0.25, metalness: 0.6 }),
+          mesh('box', '보관함 문 3', [-20.8, 1.7, -25.16], [1.1, 0.8, 0.06], '#8d949a', { roughness: 0.25, metalness: 0.6 }),
+          mesh('box', '보관함 문 4', [-23.4, 0.75, -25.16], [1.1, 0.8, 0.06], '#9aa2a8', { roughness: 0.25, metalness: 0.6 }),
+          mesh('box', '열린 보관함', [-22.1, 0.75, -25.16], [1.1, 0.8, 0.06], '#3a3f44', { roughness: 0.8 }),
+          mesh('box', '빠져나온 트레이', [-22.1, 0.75, -24.2], [1, 0.08, 1.8], '#b8bec6', { roughness: 0.3, metalness: 0.7, solid: false }),
+          mesh('box', '해부대', [-19.6, 0.46, -21.6], [1.3, 0.92, 2.4], '#8d939a', { roughness: 0.3, metalness: 0.5, geom: { cornerRadius: 0.06 } }),
+          mesh('box', '기록 캐비닛', [-24.2, 0.9, -20.6], [0.6, 1.8, 1.6], '#454039', { roughness: 0.88 }),
+          mesh('cylinder', '영안실 배관', [-21, 3.92, -21], [0.15, 7.6, 0.15], RUST, { roughness: 0.9, rot: [0, 0, 90], cast: false, solid: false }),
+
+          // ══════════ 제단실 x[-7,7] z[-25,-17] — 종착지 ══════════
+          mesh('plane', '제단실 바닥', [0, 0, -21], [14, 1, 8], '#241f1f', { roughness: 0.85, cast: false }),
+          mesh('box', '제단실 천장', [0, 4.2, -21], [14.4, 0.3, 8.4], '#171514', { roughness: 1, cast: false }),
+          wall('제단실 서벽', [-7.15, 2.1, -21], [0.3, 4.2, 8.4], WALL_D),
+          wall('제단실 동벽', [7.15, 2.1, -21], [0.3, 4.2, 8.4], WALL_D),
+          wall('제단실 남벽 L', [-4, 2.1, -17.15], [6, 4.2, 0.3], WALL_D),
+          wall('제단실 남벽 R', [4, 2.1, -17.15], [6, 4.2, 0.3], WALL_D),
+          wall('제단실 북벽 L', [-4.25, 2.1, -25.15], [5.5, 4.2, 0.3], WALL_D),
+          wall('제단실 북벽 R', [4.25, 2.1, -25.15], [5.5, 4.2, 0.3], WALL_D),
+          wall('출구 상인방', [0, 3.45, -25.15], [3.3, 1.5, 0.3], WALL_D),
+          frame('출구 문틀 L', [-1.62, 1.4, -25.15], [0.24, 2.8, 0.4]),
+          frame('출구 문틀 R', [1.62, 1.4, -25.15], [0.24, 2.8, 0.4]),
+          mesh('plane', '탈출 통로', [0, 0, -26.8], [3, 1, 3.6], '#1c1a18', { roughness: 1, cast: false }),
+          wall('탈출 통로 서벽', [-1.65, 2.1, -26.8], [0.3, 4.2, 3.6], WALL_D),
+          wall('탈출 통로 동벽', [1.65, 2.1, -26.8], [0.3, 4.2, 3.6], WALL_D),
+          mesh('box', '출구 표식', [0, 2.5, -28.4], [1.4, 0.44, 0.08], '#0f3a1e', { emissive: '#2fd47a', roughness: 1, cast: false, solid: false }),
+          // 제단 — 방의 초점
+          mesh('box', '제단 단', [0, 0.16, -21.5], [4, 0.32, 2.2], '#221d1c', { roughness: 0.92 }),
+          mesh('box', '제단', [0, 0.62, -21.5], [3.2, 0.6, 1.4], '#2a2422', { roughness: 0.88, geom: { cornerRadius: 0.04 } }),
+          mesh('cylinder', '촛불 1', [-1.2, 1.07, -21.5], [0.1, 0.3, 0.1], '#e8e0cf', { emissive: '#ff9a3c', roughness: 1, solid: false }),
+          mesh('cylinder', '촛불 2', [0, 1.12, -21.7], [0.1, 0.4, 0.1], '#e8e0cf', { emissive: '#ffb060', roughness: 1, solid: false }),
+          mesh('cylinder', '촛불 3', [1.2, 1.07, -21.4], [0.1, 0.3, 0.1], '#e8e0cf', { emissive: '#ff9a3c', roughness: 1, solid: false }),
+          mesh('torus', '붉은 고리', [0, 0.04, -21.5], [5.4, 5.4, 5.4], '#5a0f0f', {
+            emissive: '#8a1414', roughness: 1, rot: [90, 0, 0], geom: { tubeRatio: 0.018 }, cast: false, solid: false,
+          }),
+          mesh('torus', '붉은 고리 2', [0, 0.04, -21.5], [3.4, 3.4, 3.4], '#5a0f0f', {
+            emissive: '#8a1414', roughness: 1, rot: [90, 0, 0], geom: { tubeRatio: 0.024 }, cast: false, solid: false,
+          }),
+          mesh('box', '벽 낙서 L', [-6.98, 1.7, -20], [0.03, 1.8, 2.4], '#3a0a0a', { emissive: '#5a0e0e', roughness: 1, cast: false, solid: false }),
+          mesh('box', '벽 낙서 R', [6.98, 1.6, -22.4], [0.03, 1.6, 2], '#3a0a0a', { emissive: '#5a0e0e', roughness: 1, cast: false, solid: false }),
+          mesh('box', '부서진 의자', [-4.6, 0.24, -19.4], [0.5, 0.5, 0.5], '#2f2a26', { roughness: 0.92, rot: [12, 40, 68] }),
+          mesh('box', '흩어진 서류', [4.2, 0.02, -19.2], [1.6, 0.03, 1.2], '#6b665c', { roughness: 1, cast: false, solid: false }),
+
+          // ══════════ 조명 8개 · 그림자는 제단 1개만 ══════════
+          point('로비 비상등', [0, 3.8, 3], { color: '#ffb066', intensity: 7, distance: 10 }),
+          point('복도 등 A', [0, 3.8, -5], { color: '#ffa85c', intensity: 3.2, distance: 7 }),
+          point('복도 등 B', [0, 3.8, -14], { color: '#ff9a4c', intensity: 2.6, distance: 7 }),
+          point('병실A 등', [-7, 3.8, -9.5], { color: '#ffb066', intensity: 3.4, distance: 9 }),
+          point('병실B 무영등', [7.4, 2.3, -9.8], { color: '#cfe0f5', intensity: 5, distance: 8 }),
+          point('보관실 등', [-12.5, 3.8, -22.5], { color: '#8ff0b8', intensity: 7, distance: 10 }),  // 세이프룸
+          point('영안실 등', [-21, 3.8, -22.5], { color: '#9fb6d4', intensity: 2.4, distance: 8 }),
+          spot('제단 조명', [0, 4, -21.5], { color: '#ff8a3c', intensity: 26, angle: 0.62, penumbra: 0.9, distance: 12, shadow: true }),
+
+          // ══════════ 열쇠 4개 — 각 방 안쪽 구석 ══════════
+          key('열쇠 1', [-11, 0.5, -12.9], id.key1),    // 병실A 북서 구석
+          key('열쇠 2', [11, 0.5, -12.9], id.key2),     // 병실B 북동 구석
+          key('열쇠 3', [-16.2, 1.05, -21], id.key3),   // 보관실 선반(세이프룸 보상)
+          key('열쇠 4', [-23.6, 0.5, -22.6], id.key4),  // 영안실 가장 깊은 곳
+
+          // ══════════ 배터리 6개 ══════════
+          battery('배터리 1', [3, 0.38, 5.4], bat[0]),        // 로비
+          battery('배터리 2', [-3.4, 1.5, -13.2], bat[1]),    // 병실A 수납장 위
+          battery('배터리 3', [9.6, 1.28, -7.4], bat[2]),     // 병실B 트레이 위
+          battery('배터리 4', [-9.5, 0.38, -17.6], bat[3]),   // 지하 통로
+          battery('배터리 5', [-11.5, 1.18, -25.2], bat[4]),  // 보관실 작업대
+          battery('배터리 6', [-19.6, 1.1, -21.6], bat[5]),   // 영안실 해부대
+
+          // ══════════ 함정 8개 — 문틀·통로 입구는 피해서 배치 ══════════
+          trap('핏자국 1', [0.7, 0.06, -3.6], [1.5, 0.12, 1.5]),
+          trap('핏자국 2', [-0.8, 0.06, -6.8], [1.5, 0.12, 1.6]),
+          trap('핏자국 3', [0.8, 0.06, -12.6], [1.5, 0.12, 1.6]),
+          trap('핏자국 4', [-7.6, 0.06, -8.2], [1.8, 0.12, 1.8]),   // 병실A 열쇠 가는 길
+          trap('핏자국 5', [-11.2, 0.06, -10.4], [1.4, 0.12, 2]),   // 병실A 서쪽
+          trap('핏자국 6', [8, 0.06, -11.6], [1.8, 0.12, 1.8]),     // 병실B 열쇠 가는 길
+          trap('핏자국 7', [-2.8, 0.06, -20.4], [2.2, 0.12, 2.2]),  // 제단실
+          trap('핏자국 8', [3.2, 0.06, -22.8], [2.2, 0.12, 2.2]),   // 제단실
+
+          // ══════════ 점프스케어 3회(각 1회) ══════════
+          sensor('그림자', [0, 1.2, -9], [4, 2.4, 0.5], '#000000', '#000000', [
+            ev('area_enter', 'show_popup',
+              '<div style="font:16px/1.6 sans-serif;color:#ff5a5a;background:#12070a;padding:30px;height:100%;display:flex;align-items:center;justify-content:center;text-align:center">'
+              + '무언가가<br>바로 옆을 스쳐 지나갔다.</div>',
+              { popup: { mode: 'html', bg: '#12070a', title: '', width: '460px', height: '240px', anim: 'fade' }, conditions: [{ variable: 'scared', op: '==', value: false }] }),
+            ev('area_enter', 'set_variable', 'scared|set|true', { conditions: [{ variable: 'scared', op: '==', value: false }] }),
+          ], { id: id.scare1, opacity: 0.02 }),
+          sensor('속삭임', [-9.5, 1.2, -18], [3, 2.4, 0.5], '#000000', '#000000', [
+            ev('area_enter', 'show_popup',
+              '<div style="font:16px/1.6 sans-serif;color:#ff5a5a;background:#12070a;padding:30px;height:100%;display:flex;align-items:center;justify-content:center;text-align:center">'
+              + '뒤에서<br>당신의 이름을 부르는 소리가 났다.</div>',
+              { popup: { mode: 'html', bg: '#12070a', title: '', width: '460px', height: '240px', anim: 'fade' }, conditions: [{ variable: 'scared2', op: '==', value: false }] }),
+            ev('area_enter', 'set_variable', 'scared2|set|true', { conditions: [{ variable: 'scared2', op: '==', value: false }] }),
+          ], { id: id.scare2, opacity: 0.02 }),
+          sensor('보관함 소리', [-21, 1.2, -23.6], [7, 2.4, 0.5], '#000000', '#000000', [
+            ev('area_enter', 'show_popup',
+              '<div style="font:16px/1.6 sans-serif;color:#ff5a5a;background:#12070a;padding:30px;height:100%;display:flex;align-items:center;justify-content:center;text-align:center">'
+              + '닫혀 있던 보관함 하나가<br>천천히 열렸다.</div>',
+              { popup: { mode: 'html', bg: '#12070a', title: '', width: '460px', height: '240px', anim: 'fade' }, conditions: [{ variable: 'scared3', op: '==', value: false }] }),
+            ev('area_enter', 'set_variable', 'scared3|set|true', { conditions: [{ variable: 'scared3', op: '==', value: false }] }),
+          ], { id: id.scare3, opacity: 0.02 }),
+
+          // ══════════ 출구 ══════════
+          sensor('탈출구', [0, 1.2, -28.2], [2.8, 2.4, 0.8], '#0f3a1e', '#1a6b34', [
+            ev('area_enter', 'game_win', '병원을 빠져나왔다.'),
+          ], { opacity: 0.06 }),
+
+          // ══════════ 최종 철문 — keys>=4, 복도 끝 x[-1,1] z=-17 ══════════
+          {
+            id: id.door,
+            name: '잠긴 철문',
+            assetId: null,
+            isGroup: true,
+            isActuator: true,
+            material: {},
+            parentId: null,
+            layer: 'default',
+            position: { x: -1, y: 0, z: -17 },
+            rotation: { x: 0, y: 0, z: 0 },
+            scale: { x: 1, y: 1, z: 1 },
+            visible: true,
+            locked: false,
+            physics: { ...DEFAULT_PHYSICS },
+            events: [],
+            actuator: { kind: 'rotate', axis: 'y', min: 0, max: 100, drive: 'event', value: 0, speed: 1.1, ease: 'smooth', collider: true },
+          },
+          { ...mesh('box', '철문', [1, 1.35, 0], [2, 2.7, 0.14], '#4a4640', { roughness: 0.55, metalness: 0.4 }), parentId: id.door },
+          { ...mesh('box', '철문 보강대', [1, 1.9, 0.09], [1.8, 0.14, 0.05], '#5f5a52', { roughness: 0.4, metalness: 0.6, solid: false }), parentId: id.door },
+          { ...mesh('sphere', '문 손잡이', [1.78, 1.3, 0.12], [0.13, 0.13, 0.13], '#8a8272', { roughness: 0.3, metalness: 0.85, solid: false }), parentId: id.door },
+
+          // ══════════ 지하 격벽 — keys>=2, 병실A 북벽 x[-10.5,-8.5] z=-14 ══════════
+          {
+            id: id.gate,
+            name: '지하 격벽',
+            assetId: null,
+            isGroup: true,
+            isActuator: true,
+            material: {},
+            parentId: null,
+            layer: 'default',
+            position: { x: -10.5, y: 0, z: -14.15 },
+            rotation: { x: 0, y: 0, z: 0 },
+            scale: { x: 1, y: 1, z: 1 },
+            visible: true,
+            locked: false,
+            physics: { ...DEFAULT_PHYSICS },
+            events: [],
+            actuator: { kind: 'rotate', axis: 'y', min: 0, max: 95, drive: 'event', value: 0, speed: 1.1, ease: 'smooth', collider: true },
+          },
+          { ...mesh('box', '격벽 문짝', [1, 1.35, 0], [2, 2.7, 0.16], '#4d4a44', { roughness: 0.5, metalness: 0.45 }), parentId: id.gate },
+          { ...mesh('box', '격벽 표식', [1, 2.05, 0.11], [0.9, 0.26, 0.05], '#5a4a10', { emissive: '#d49a1e', roughness: 1, solid: false }), parentId: id.gate },
+        ],
+      };
+    },
   },
 ];

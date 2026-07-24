@@ -81,6 +81,21 @@ export interface EnvSchema {
   // 상호작용 근접 범위(m) 씬 기본값 — interact(E)/approach 트리거·E 프롬프트·하이라이트가 공유.
   //   미설정 = 3. 오브젝트가 자체 interactRange를 가지면 그 값이 우선한다.
   interactRange?: number;
+  // 손전등 — 캐릭터에 붙어 시선 방향을 비추는 스팟라이트. 미설정/enabled false = 기존 동작(무변화).
+  //   꺼져 있으면 짙은 안개(offFogDensity)로 눈앞만 보이고, 켜면 안개가 옅어지며(onFogDensity) 빛이 켜진다.
+  //   플레이 모드 전용(PlayModeController가 렌더). 토글 키는 T 고정. exp 모드 안개에서만 시야 효과가 동작한다
+  //   (linear 모드거나 fog.enabled=false면 빛만 켜지고 시야 반경 연출은 없음).
+  flashlight?: {
+    enabled: boolean;
+    color?: string;             // 빛 색. 기본 '#fff4e0'(따뜻한 백색)
+    intensity?: number;         // 켰을 때 세기. 기본 22
+    angle?: number;             // 원뿔 각(라디안). 기본 0.45
+    distance?: number;          // 비추는 거리(m). 기본 14
+    offFogDensity?: number;     // 꺼졌을 때 안개 밀도(짙게=시야 제한). 기본 0.35
+    onFogDensity?: number;      // 켰을 때 안개 밀도(옅게=멀리 보임). 미설정=씬 기본 fog.density
+    batteryVariable?: string;   // 배터리로 쓸 GameVariable(number) 이름. 미설정=무한 사용
+    drainPerSec?: number;       // 켜진 동안 배터리 초당 소모량. 기본 1/6(6초당 1)
+  };
   notes?: string;
   // 게시 뷰어의 고정 화면 비율(width/height). 미설정/0 = 자유(브라우저 채움). 예: 16/9≈1.778, 1(정사각), 9/16≈0.5625.
   //   설정 시 뷰어가 이 비율의 프레임으로 레터박스(가운데 정렬 + 배경 여백)한다.

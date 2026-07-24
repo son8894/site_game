@@ -94,7 +94,7 @@ function MovingCollider({ object, assets, onEvent, allObjects }: {
     <RigidBody
       ref={rbRef}
       type="kinematicPosition"
-      colliders={getColliderType(object)}
+      colliders={getKinematicColliderType(object)}
       position={basePos}
       rotation={baseRot}
       userData={{ objectId: object.id }}
@@ -149,7 +149,7 @@ function ActuatorCollider({ object, assets, onEvent, allObjects }: {
     <RigidBody
       ref={rbRef}
       type="kinematicPosition"
-      colliders={getColliderType(object)}
+      colliders={getKinematicColliderType(object)}
       position={basePos}
       rotation={baseRot}
       userData={{ objectId: object.id }}
@@ -248,6 +248,15 @@ function getColliderType(object: ObjectNodeSchema) {
   return object.primitiveShape === 'box' ? 'cuboid'
     : object.primitiveShape === 'sphere' ? 'ball'
     : 'trimesh';
+}
+
+// 움직이는(kinematic) 강체용 콜라이더 — **trimesh를 쓰면 안 된다.**
+// Rapier의 캐릭터 컨트롤러는 kinematic trimesh를 안정적으로 밀어내지 못해, 캐릭터가 그대로 통과한다
+// (모터/그룹은 primitiveShape이 없어 getColliderType이 trimesh를 주므로 '닫힌 문을 뚫고 지나가는' 버그가 났다).
+// 볼록 껍질(hull)은 kinematic에서도 견고하게 막는다. 오목 형상이 두꺼워지는 근사는 감수한다.
+function getKinematicColliderType(object: ObjectNodeSchema) {
+  const t = getColliderType(object);
+  return t === 'trimesh' ? 'hull' : t;
 }
 
 // physics.enabled가 꺼진 오브젝트도 플레이 모드에서 고정 콜라이더를 부여
@@ -371,9 +380,13 @@ interface Props {
   cameraMode?: 'third' | 'first' | 'topdown' | 'fixed';
   /** fixed 카메라 대상 오브젝트 id — 그 위치에서 캐릭터를 바라봄 */
   cameraFixedId?: string | null;
+  /** 재시작 카운터 — 바뀌면 캐릭터를 스폰으로 되돌린다. */
+  respawnNonce?: number;
+  /** 손전등 on/off가 바뀔 때(뷰어가 배터리 소모·안개 시야를 구독) — scene.environment.flashlight는 여기서 직접 읽는다. */
+  onFlashlightChange?: (on: boolean) => void;
 }
 
-export function PlayCanvas({ scene, azimuthRef, onObjectClick, mobileInputRef, onInteractPromptChange, passableIds, movedIds, focusPoint, movementLocked, onPointerFree, cameraMode, cameraFixedId }: Props) {
+export function PlayCanvas({ scene, azimuthRef, onObjectClick, mobileInputRef, onInteractPromptChange, passableIds, movedIds, focusPoint, movementLocked, onPointerFree, cameraMode, cameraFixedId, respawnNonce, onFlashlightChange }: Props) {
   const playerRef = useRef<RapierRigidBody>(null);
   const assets = scene.assets ?? [];
 
@@ -579,6 +592,9 @@ export function PlayCanvas({ scene, azimuthRef, onObjectClick, mobileInputRef, o
         characterScale={scene.environment.playerCharacterScale ?? 1}
         playerSpeed={scene.environment.playerSpeed}
         playerJumpForce={scene.environment.playerJumpForce}
+        respawnNonce={respawnNonce}
+        flashlight={scene.environment.flashlight}
+        onFlashlightChange={onFlashlightChange}
         mobileInputRef={mobileInputRef}
         interactables={interactables}
         onInteractableChange={(id) =>

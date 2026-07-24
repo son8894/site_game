@@ -251,6 +251,8 @@ interface Props {
   movedIds?: Set<string>;
   /** 플레이 모드 카메라 포커스 대상 objectId — focus_object가 플레이에서 발동됐을 때 */
   playFocusId?: string | null;
+  /** 게임 재시작 카운터 — 바뀌면 캐릭터가 스폰으로 되돌아간다(PlayModeController까지 전달). */
+  respawnNonce?: number;
   /** 캐릭터 이동 잠금 — 팝업·포커스 등 상호작용 진행 중 */
   movementLocked?: boolean;
   /** 중앙 조준(crosshair) 포인터 — true면 hover/click 레이캐스트를 마우스가 아니라 화면 중앙에서(플레이 데스크톱). */
@@ -261,6 +263,10 @@ interface Props {
   cameraMode?: 'third' | 'first' | 'topdown' | 'fixed';
   /** fixed 카메라 대상 오브젝트 id */
   cameraFixedId?: string | null;
+  /** 손전등 on/off(ViewerClient가 소유) — exp 안개 밀도를 override해 "꺼지면 시야 제한/켜면 시야 확장"을 만든다. */
+  flashlightOn?: boolean;
+  /** PlayCanvas→PlayModeController까지 내려가 T키 토글 시 호출된다. */
+  onFlashlightChange?: (on: boolean) => void;
 }
 
 const EMPTY_CLIPS: Record<string, ClipReq> = {};
@@ -319,7 +325,7 @@ function InitialFit({ objects, orbitRef, startView }: {
   return null;
 }
 
-export function ViewerCanvas({ scene, playMode, onObjectClick, mobileInputRef, focusRequest, clipRequests, actuatorDrive, onInteractPromptChange, interactHighlightId, dialogueNonce, passableIds, movedIds, playFocusId, movementLocked, centerPointer, onPointerFree, cameraMode, cameraFixedId }: Props) {
+export function ViewerCanvas({ scene, playMode, onObjectClick, mobileInputRef, focusRequest, clipRequests, actuatorDrive, onInteractPromptChange, interactHighlightId, dialogueNonce, passableIds, movedIds, playFocusId, movementLocked, centerPointer, onPointerFree, cameraMode, cameraFixedId, respawnNonce, flashlightOn, onFlashlightChange }: Props) {
   const { environment, objects } = scene;
   // 둘러보기 카메라 제한 — 고정 기본값 + 저장된 시작 뷰가 잘리지 않도록 보정. lib/cameraLimits.ts 참고.
   const exploreLim = cameraLimits(environment).effective;
@@ -432,8 +438,14 @@ export function ViewerCanvas({ scene, playMode, onObjectClick, mobileInputRef, f
         // fog 색 = 배경이 수렴하는 색과 일치시켜 지평선 하드컷을 없앤다.
         //   그라데이션이면 **수평선 색**, 단색이면 하늘색, 대기(Sky) 모드만 사용자가 지정한 fog 색.
         const fogColor = isGradient ? skyHorizon : isSolid ? skyColor : environment.fog.color;
+        // 손전등 — 플레이 모드 + exp 안개일 때만 밀도를 override한다(꺼짐=짙게/시야제한, 켜짐=옅게).
+        //   linear 모드는 미지원(범위 스키마가 near/far 2개뿐이라 손전등 전용 필드를 또 늘리지 않음 — 문서화된 제약).
+        const fl = environment.flashlight;
+        const density = playMode && fl?.enabled && environment.fog.mode === 'exp'
+          ? (flashlightOn ? (fl.onFogDensity ?? environment.fog.density ?? 0.02) : (fl.offFogDensity ?? 0.35))
+          : environment.fog.density ?? 0.02;
         return environment.fog.mode === 'exp'
-          ? <fogExp2 attach="fog" args={[fogColor, environment.fog.density ?? 0.02]} />
+          ? <fogExp2 attach="fog" args={[fogColor, density]} />
           : <fog attach="fog" args={[fogColor, environment.fog.near, environment.fog.far]} />;
       })()}
 
@@ -530,7 +542,7 @@ export function ViewerCanvas({ scene, playMode, onObjectClick, mobileInputRef, f
       {/* ── 플레이 모드 ── */}
       {playMode && (
         <Suspense fallback={null}>
-          <PlayCanvas scene={scene} azimuthRef={azimuthRef} onObjectClick={onObjectClick} mobileInputRef={mobileInputRef} onInteractPromptChange={onInteractPromptChange} passableIds={passableIds} movedIds={movedIds} focusPoint={playFocusPoint} movementLocked={movementLocked} onPointerFree={onPointerFree} cameraMode={cameraMode} cameraFixedId={cameraFixedId} />
+          <PlayCanvas scene={scene} azimuthRef={azimuthRef} onObjectClick={onObjectClick} mobileInputRef={mobileInputRef} onInteractPromptChange={onInteractPromptChange} passableIds={passableIds} movedIds={movedIds} focusPoint={playFocusPoint} movementLocked={movementLocked} onPointerFree={onPointerFree} cameraMode={cameraMode} cameraFixedId={cameraFixedId} respawnNonce={respawnNonce} onFlashlightChange={onFlashlightChange} />
         </Suspense>
       )}
 

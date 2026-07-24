@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useEffect, MutableRefObject, useMemo } from 'react';
+import { useRef, useEffect, useState, MutableRefObject, useMemo } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { useGLTF, useAnimations } from '@react-three/drei';
 import { RigidBody, CapsuleCollider, CoefficientCombineRule, useRapier, type RapierRigidBody } from '@react-three/rapier';
@@ -148,6 +148,18 @@ interface Props {
   cameraMode?: 'third' | 'first' | 'topdown' | 'fixed';
   /** fixed 모드일 때 카메라가 놓일 월드 지점(그 위치에서 캐릭터를 바라봄). */
   fixedTarget?: { x: number; y: number; z: number } | null;
+  /** 값이 바뀌면 캐릭터를 스폰 지점으로 되돌린다(게임 재시작). 이게 없으면 죽은 자리에서 다시 시작한다. */
+  respawnNonce?: number;
+  /** 손전등 설정(EnvSchema.flashlight) — 있고 enabled면 T키로 토글되는 스팟라이트를 렌더. */
+  flashlight?: {
+    enabled: boolean;
+    color?: string;
+    intensity?: number;
+    angle?: number;
+    distance?: number;
+  };
+  /** 손전등 on/off가 바뀔 때 — 안개(부모 캔버스)·배터리 소모(뷰어)가 이 값을 구독한다. */
+  onFlashlightChange?: (on: boolean) => void;
 }
 
 export function PlayModeController({
@@ -174,6 +186,9 @@ export function PlayModeController({
   onPointerFree,
   cameraMode = 'third',
   fixedTarget = null,
+  respawnNonce = 0,
+  flashlight,
+  onFlashlightChange,
 }: Props) {
   const keys = useRef({ w: false, a: false, s: false, d: false, space: false });
   // 현재 근접한 상호작용 대상 id (useFrame이 갱신, keydown이 읽음)
@@ -189,6 +204,12 @@ export function PlayModeController({
   // 1회 등록되는 포인터 핸들러가 최신 콜백을 읽도록 ref로 보관(effect 의존성에 넣으면 재등록된다).
   const onPointerFreeRef = useRef(onPointerFree);
   onPointerFreeRef.current = onPointerFree;
+  // 손전등 — on/off는 이 컴포넌트가 소유(입력이 여기서 일어나므로). 부모(배터리 소모·안개)는 콜백으로만 통지받는다.
+  const [flashOn, setFlashOn] = useState(false);
+  const flashLightRef = useRef<THREE.SpotLight>(null);
+  const flashTargetObj = useMemo(() => new THREE.Object3D(), []);
+  const onFlashlightChangeRef = useRef(onFlashlightChange);
+  onFlashlightChangeRef.current = onFlashlightChange;
   const { camera, gl } = useThree();
   const { world, rapier } = useRapier();
   const elevationRef = useRef(0.45);
@@ -213,6 +234,25 @@ export function PlayModeController({
   // 오브젝트별 마지막 접촉 시각(ms) — 벽에 밀착하면 접촉 판정이 프레임 간 깜빡이므로
   // 짧은 끊김은 같은 접촉으로 간주하고, 일정 시간 이상 떨어졌다 다시 닿으면 재발동
   const touchingTimesRef = useRef<Map<string, number>>(new Map());
+
+  // 재시작(respawnNonce 변화) 시 캐릭터를 스폰 지점으로 되돌린다.
+  //   restartGame()은 변수·오버라이드만 초기화하고 **캐릭터 위치는 안 건드렸다** →
+  //   함정에 죽고 '다시 시작'을 눌러도 죽은 자리(함정 위)에 그대로 서 있어 즉시 재사망했다.
+  //   초기 마운트(nonce 0)에는 RigidBody의 position prop이 이미 스폰이므로 건너뛴다.
+  const prevRespawn = useRef(respawnNonce);
+  useEffect(() => {
+    if (prevRespawn.current === respawnNonce) return;
+    prevRespawn.current = respawnNonce;
+    const rb = playerRef.current;
+    if (!rb) return;
+    rb.setNextKinematicTranslation({ x: spawnPosition[0], y: Math.max(spawnPosition[1], 1), z: spawnPosition[2] });
+    rb.setTranslation({ x: spawnPosition[0], y: Math.max(spawnPosition[1], 1), z: spawnPosition[2] }, true);
+    verticalVelRef.current = 0;
+    touchingTimesRef.current.clear(); // 죽은 자리의 접촉 기록을 지워야 부활 직후 같은 트리거가 안 터진다
+    approachingRef.current.clear();
+    // 죽어서 손전등이 켜진 채였다면 재시작 시 꺼둔다(배터리 소모도 부모 쪽에서 같이 멈춘다).
+    if (flashOn) { setFlashOn(false); onFlashlightChangeRef.current?.(false); }
+  }, [respawnNonce, spawnPosition, playerRef]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 캐릭터 컨트롤러 생성 — 경사각 제한/지면 스냅을 엔진이 직접 처리
   useEffect(() => {
@@ -245,6 +285,14 @@ export function PlayModeController({
       if (e.code === 'KeyE' && !e.repeat) {
         const id = activeInteractRef.current;
         if (id) onInteractRef.current?.(id);
+      }
+      // 손전등(T): on/off 토글. 씬에 flashlight.enabled가 없으면 무반응(다른 게임에 영향 없음).
+      if (e.code === 'KeyT' && !e.repeat && flashlight?.enabled) {
+        setFlashOn((prev) => {
+          const next = !prev;
+          onFlashlightChangeRef.current?.(next);
+          return next;
+        });
       }
       // 킥(F): 앞쪽 근처 dynamic 물체를 앞·위로 강하게 날린다(질량 무관 일정 속도).
       if (e.code === 'KeyF' && !e.repeat) {
@@ -598,28 +646,59 @@ export function PlayModeController({
       camera.position.copy(_camPos.current);
       camera.lookAt(camTarget.current);
     }
+
+    // 손전등 — 시선 방향(az)으로 매 프레임 위치·타겟 갱신. 캐릭터 몸통 회전(이동 시에만 lerp)이 아니라
+    //   카메라 시선 기준이라 3인칭에서도 "보는 쪽"을 정확히 비춘다(interact 판정과 동일 전방벡터).
+    //   newPos.y는 캡슐 "중심"(바닥=중심−0.9, 정수리=중심+0.9 — 위 캡슐 콜라이더 주석 참고) → 눈높이는 +0.7 정도.
+    if (flashLightRef.current && flashOn) {
+      const fx = -Math.sin(az), fz = -Math.cos(az);
+      const eyeY = newPos.y + 0.7;
+      flashLightRef.current.position.set(newPos.x, eyeY, newPos.z);
+      const dist = flashlight?.distance ?? 14;
+      flashTargetObj.position.set(newPos.x + fx * dist, eyeY - dist * 0.12, newPos.z + fz * dist);
+    }
   });
 
   return (
-    <RigidBody
-      ref={playerRef}
-      type="kinematicPosition"
-      position={spawnPosition}
-      colliders={false}
-    >
-      <CapsuleCollider args={[0.5, 0.4]} friction={0} frictionCombineRule={CoefficientCombineRule.Min} />
-      <group ref={characterGroupRef}>
-        {characterUrl ? (
-          <GlbCharacter
-            url={characterUrl}
-            scale={characterScale}
-            movingRef={movingRef}
-            jumpingRef={jumpingRef}
+    <>
+      <RigidBody
+        ref={playerRef}
+        type="kinematicPosition"
+        position={spawnPosition}
+        colliders={false}
+      >
+        <CapsuleCollider args={[0.5, 0.4]} friction={0} frictionCombineRule={CoefficientCombineRule.Min} />
+        <group ref={characterGroupRef}>
+          {characterUrl ? (
+            <GlbCharacter
+              url={characterUrl}
+              scale={characterScale}
+              movingRef={movingRef}
+              jumpingRef={jumpingRef}
+            />
+          ) : (
+            <DefaultCharacter />
+          )}
+        </group>
+      </RigidBody>
+      {/* 손전등 — RigidBody 밖(캐릭터 로컬이 아니라 월드 좌표로 매 프레임 직접 갱신, useFrame 끝부분 참고).
+          target은 PlaySceneLight와 동일한 패턴(별도 Object3D, primitive로 씬에 편입). */}
+      {flashlight?.enabled && (
+        <>
+          <spotLight
+            ref={flashLightRef}
+            visible={flashOn}
+            color={flashlight.color ?? '#fff4e0'}
+            intensity={flashlight.intensity ?? 22}
+            angle={flashlight.angle ?? 0.45}
+            penumbra={0.55}
+            distance={(flashlight.distance ?? 14) * 1.3}
+            decay={2}
+            target={flashTargetObj}
           />
-        ) : (
-          <DefaultCharacter />
-        )}
-      </group>
-    </RigidBody>
+          <primitive object={flashTargetObj} />
+        </>
+      )}
+    </>
   );
 }

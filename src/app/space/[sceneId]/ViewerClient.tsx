@@ -123,6 +123,8 @@ export function ViewerClient({ scene, projectName = '', isOwner = false, project
   const [cameraFixedId, setCameraFixedId] = useState<string | null>(null); // fixed 모드 대상 오브젝트
   // E키를 누를 때마다 증가 — 대화 열기/다음 문장(DialogueAdvanceContext로 3D 트리에 전달)
   const [dialogueNonce, setDialogueNonce] = useState(0);
+  // 손전등 on/off — 입력은 PlayModeController(T키)가 담당, 여기선 통지만 받아 안개(ViewerCanvas)·배터리 소모(아래)에 쓴다.
+  const [flashlightOn, setFlashlightOn] = useState(false);
 
   // 런타임 오브젝트 표시/숨김 오버라이드 (show/hide/toggle_object 액션) — objectId → visible
   const [visOverride, setVisOverride] = useState<Record<string, boolean>>({});
@@ -317,6 +319,26 @@ export function ViewerClient({ scene, projectName = '', isOwner = false, project
     return () => window.clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene.variables, runNonce]);
+
+  // 손전등 배터리 — **켜져 있는 동안에만** 초당 drainPerSec 소모(꺼져 있으면 소모 없음).
+  //   기존 on_timer 상시소모와 다른 지점: 배터리는 "존재 비용"이 아니라 "사용 비용" — 손전등을 안 켜면 안 준다.
+  //   0이 되면 여기선 그냥 0에서 멈추고, 실제 게임오버는 씬의 variable_changed(battery<=0) 이벤트가 담당(일반화 유지).
+  useEffect(() => {
+    const fl = scene.environment.flashlight;
+    const varName = fl?.batteryVariable;
+    if (!fl?.enabled || !varName || !flashlightOn) return;
+    const rate = fl.drainPerSec ?? 1 / 6;
+    const iv = window.setInterval(() => {
+      if (gameResultRef.current) return;
+      const cur = varsRef.current[varName];
+      if (typeof cur === 'number' && cur > 0) {
+        varsRef.current[varName] = Math.max(0, cur - rate);
+        onVarsChanged();
+      }
+    }, 1000);
+    return () => window.clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flashlightOn, scene.environment.flashlight, runNonce]);
 
   // 오버라이드를 씬 데이터에 반영해 렌더 (모든 뷰어 경로가 object.visible을 존중하므로 이걸로 충분)
   //   + 공용 재질 에셋(materialId) 리졸브 → ViewerObject는 object.material만 읽으므로 여기서 미리 주입.
@@ -575,6 +597,7 @@ export function ViewerClient({ scene, projectName = '', isOwner = false, project
     setGameResult(null);
     setInteractionLock(false);
     setActuatorDrive({}); // 관절 구동 목표 초기화(variable은 변수 재초기화 시 재동기)
+    setFlashlightOn(false); // 손전등도 꺼둔다(PlayModeController가 respawnNonce로 자체 리셋+통지하지만 이중 안전)
     // Phase E — 재시작 시 global(세션) 변수도 initial로(세션 저장 제거). persistent(최고점수 등)는 유지.
     for (const v of scene.variables ?? []) {
       if (v.scope === 'global') { try { window.sessionStorage.removeItem(varStoreKey(v.name)); } catch { /* ignore */ } }
@@ -787,7 +810,7 @@ export function ViewerClient({ scene, projectName = '', isOwner = false, project
   // 고정 화면 비율(frameAspect) — 설정 시 캔버스를 그 비율로 레터박스(가운데 정렬 + 배경 여백).
   const frameAspect = scene.environment.frameAspect && scene.environment.frameAspect > 0 ? scene.environment.frameAspect : null;
   const viewerCanvasEl = (
-    <ViewerCanvas scene={effectiveScene} playMode={playMode} onObjectClick={handleObjectEvent} mobileInputRef={mobileInputRef} focusRequest={focusRequest} clipRequests={clipRequests} actuatorDrive={actuatorDrive} onInteractPromptChange={(obj) => setInteractTarget(obj ? { id: obj.id, name: obj.name } : null)} interactHighlightId={interactTarget?.id ?? null} dialogueNonce={dialogueNonce} passableIds={passableIds} movedIds={movedIds} playFocusId={playFocus?.id ?? null} movementLocked={interactionLock} centerPointer={playMode && !isTouch && !pointerFree} onPointerFree={setPointerFree} cameraMode={playMode ? cameraMode : 'third'} cameraFixedId={cameraFixedId} />
+    <ViewerCanvas scene={effectiveScene} playMode={playMode} onObjectClick={handleObjectEvent} mobileInputRef={mobileInputRef} focusRequest={focusRequest} clipRequests={clipRequests} actuatorDrive={actuatorDrive} onInteractPromptChange={(obj) => setInteractTarget(obj ? { id: obj.id, name: obj.name } : null)} interactHighlightId={interactTarget?.id ?? null} dialogueNonce={dialogueNonce} passableIds={passableIds} movedIds={movedIds} playFocusId={playFocus?.id ?? null} movementLocked={interactionLock} centerPointer={playMode && !isTouch && !pointerFree} onPointerFree={setPointerFree} cameraMode={playMode ? cameraMode : 'third'} cameraFixedId={cameraFixedId} respawnNonce={runNonce} flashlightOn={flashlightOn} onFlashlightChange={setFlashlightOn} />
   );
 
   return (
